@@ -256,15 +256,15 @@ function deploymentTable(rows) {
 }
 
 function wireDeployments(root = document) {
-  $("[data-logs]", root).forEach((button) => button.onclick = () => showLogs(button.dataset.logs));
-  $("[data-cancel-deploy]", root).forEach((button) => button.onclick = async () => {
+  $$("[data-logs]", root).forEach((button) => button.onclick = () => showLogs(button.dataset.logs));
+  $$("[data-cancel-deploy]", root).forEach((button) => button.onclick = async () => {
     if (!confirm("Cancel this queued deployment?")) return;
     try {
       await api(`/api/deployments/${button.dataset.cancelDeploy}/cancel`, { method:"POST" });
       await render();
     } catch (error) { alert(error.message); }
   });
-  $("[data-rollback]", root).forEach((button) => button.onclick = () => rollback(button.dataset.rollback));
+  $$("[data-rollback]", root).forEach((button) => button.onclick = () => rollback(button.dataset.rollback));
 }
 
 async function renderOverview() {
@@ -350,7 +350,7 @@ async function renderServers() {
       <tbody>${body || '<tr><td colspan="8" class="empty">No agents connected.</td></tr>'}</tbody>
     </table></div>
   `;
-  $("[data-drain-server]").forEach((button) => button.onclick = async () => {
+  $$("[data-drain-server]").forEach((button) => button.onclick = async () => {
     const next = button.dataset.draining !== "true";
     const label = next ? "Drain this server so no new work is scheduled here?" : "Resume scheduling on this server?";
     if (!confirm(label)) return;
@@ -385,7 +385,7 @@ async function renderDatabases() {
       <tbody>${body || '<tr><td colspan="7" class="empty">No managed databases yet. Add one from a project.</td></tr>'}</tbody>
     </table></div>
   `;
-  $("[data-db-backup]").forEach((button) => button.onclick = async () => {
+  $$("[data-db-backup]").forEach((button) => button.onclick = async () => {
     try {
       const queued = await api(`/api/databases/${button.dataset.dbBackup}/backup`, { method: "POST" });
       await pollCommand(queued.commandId, 30 * 60_000);
@@ -393,7 +393,7 @@ async function renderDatabases() {
       renderDatabases();
     } catch (error) { alert(error.message); }
   });
-  $("[data-delete-db]").forEach((button) => button.onclick = async () => {
+  $$("[data-delete-db]").forEach((button) => button.onclick = async () => {
     const deleteData = confirm("Remove this managed database?\n\nOK = remove container AND permanently delete its Docker data volume.\nCancel = keep the data volume.");
     const proceed = deleteData || confirm("Keep the data volume but remove the managed database container and platform record?");
     if (!proceed) return;
@@ -761,13 +761,13 @@ async function openProject(id) {
     } catch (error) { alert(error.message); }
   };
 
-  $("[data-verify-domain]", dialog).forEach((button) => button.onclick = async () => {
+  $$("[data-verify-domain]", dialog).forEach((button) => button.onclick = async () => {
     try {
       await api(`/api/domains/${button.dataset.verifyDomain}/verify`, { method: "POST" });
       openProject(id);
     } catch (error) { alert(error.message); }
   });
-  $("[data-delete-domain]", dialog).forEach((button) => button.onclick = async () => {
+  $$("[data-delete-domain]", dialog).forEach((button) => button.onclick = async () => {
     if (!confirm("Remove this domain from the service and live route?")) return;
     try {
       const result = await api(`/api/domains/${button.dataset.deleteDomain}`, { method:"DELETE" });
@@ -827,7 +827,7 @@ async function openProject(id) {
     } catch (error) { alert(error.message); }
   };
 
-  $("[data-project-db-backup]", dialog).forEach((button) => button.onclick = async () => {
+  $$("[data-project-db-backup]", dialog).forEach((button) => button.onclick = async () => {
     try {
       const queued = await api(`/api/databases/${button.dataset.projectDbBackup}/backup`, { method: "POST" });
       await pollCommand(queued.commandId, 30 * 60_000);
@@ -835,7 +835,7 @@ async function openProject(id) {
       openProject(id);
     } catch (error) { alert(error.message); }
   });
-  $("[data-project-db-delete]", dialog).forEach((button) => button.onclick = async () => {
+  $$("[data-project-db-delete]", dialog).forEach((button) => button.onclick = async () => {
     const deleteData = confirm("Remove this database?\n\nOK permanently deletes its data volume. Cancel keeps the data volume.");
     const proceed = deleteData || confirm("Keep the data volume and remove only the managed resource?");
     if (!proceed) return;
@@ -858,7 +858,7 @@ async function openProject(id) {
     } catch (error) { alert(error.message); }
   };
 
-  $("[data-cron-log]", dialog).forEach((button) => button.onclick = () => {
+  $$("[data-cron-log]", dialog).forEach((button) => button.onclick = () => {
     const run = (service.cron_runs || []).find((item) => item.id === button.dataset.cronLog);
     if (!run) return;
     showDialog(`Cron run ${run.id}`, `<div class="log">${esc(run.logs || "No output.")}</div>`);
