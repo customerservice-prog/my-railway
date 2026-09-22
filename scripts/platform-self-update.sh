@@ -140,9 +140,20 @@ if docker image inspect my-railway-updater:local >/dev/null 2>&1; then
   docker tag my-railway-updater:local "my-railway-updater:rollback-${CURRENT_SHA:0:12}"
 fi
 
-set -a
-source "$ROOT/.env"
-set +a
+get_env() {
+  local key="$1"
+  grep -E "^$key=" "$ROOT/.env" | tail -n1 | cut -d= -f2- || true
+}
+
+POSTGRES_PASSWORD="$(get_env POSTGRES_PASSWORD)"
+PLATFORM_HOST="$(get_env PLATFORM_HOST)"
+PLATFORM_NETWORK="$(get_env PLATFORM_NETWORK)"
+PLATFORM_NETWORK="${PLATFORM_NETWORK:-myrailway}"
+
+if [ -z "$POSTGRES_PASSWORD" ]; then
+  log "POSTGRES_PASSWORD is missing from .env."
+  exit 1
+fi
 
 CANDIDATE_CONTROL="mr-platform-control-candidate-$SHORT"
 docker rm -f "$CANDIDATE_CONTROL" >/dev/null 2>&1 || true
