@@ -311,6 +311,15 @@ export async function restartService(serviceId: string) {
   return { restarted: names };
 }
 
+export async function removeVolume(volumeName: string, serviceId?: string, deleteData=false) {
+  if (serviceId) await stopService(serviceId);
+  if (deleteData) {
+    await docker(["volume","rm","-f",volumeName], 120_000);
+    return { detached:true, deletedData:true, volumeName };
+  }
+  return { detached:true, deletedData:false, volumeName };
+}
+
 export async function backupVolume(volumeName: string, backupName: string) {
   await fs.mkdir(backupDir, { recursive:true });
   const safe = backupName.replace(/[^a-zA-Z0-9_.-]/g, "-");
