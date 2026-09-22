@@ -62,10 +62,6 @@ get_env() {
 configured_acme_email="$(get_env ACME_EMAIL)"
 configured_platform_host="$(get_env PLATFORM_HOST)"
 
-if [ -n "$configured_acme_email" ]; then
-  sed -i "s|^      email: .*|      email: $configured_acme_email|" infra/traefik/traefik.yml
-fi
-
 if [ -n "$configured_platform_host" ]; then
   replace_env COOKIE_SECURE true
   cat > data/routes/control.yml <<EOF
