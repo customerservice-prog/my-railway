@@ -632,11 +632,13 @@ async function renderPlatform() {
   let info;
   let status;
   let readiness;
+  let settingsData;
   try {
-    [info, status, readiness] = await Promise.all([
+    [info, status, readiness, settingsData] = await Promise.all([
       api("/api/platform/update/info"),
       api("/api/platform/update/status"),
-      api("/api/platform/readiness")
+      api("/api/platform/readiness"),
+      api("/api/platform/settings")
     ]);
   } catch (error) {
     $("#content").innerHTML = `
@@ -681,6 +683,49 @@ async function renderPlatform() {
     <div class="section-head"><h3>Launch readiness</h3><span class="muted">Private-production gate</span></div>
     <div class="panel readiness-list">${readinessRows || '<div class="empty">No readiness checks returned.</div>'}</div>
 
+    <div class="section-head"><h3>Platform settings</h3><span class="muted">Saved to the host and applied by the independent supervisor</span></div>
+    <div class="panel">
+      <form id="platform-settings-form" class="p22">
+        <div class="form-grid">
+          <label>Dashboard hostname<input name="PLATFORM_HOST" value="${esc(settingsData.settings.PLATFORM_HOST || "")}" placeholder="cloud.example.com"></label>
+          <label>Public IPv4<input name="PUBLIC_IP" value="${esc(settingsData.settings.PUBLIC_IP || "")}" placeholder="203.0.113.10"></label>
+          <label>ACME / certificate email<input name="ACME_EMAIL" type="email" value="${esc(settingsData.settings.ACME_EMAIL || "")}" placeholder="you@example.com"></label>
+          <label>Release channel<input name="PLATFORM_UPDATE_REF" value="${esc(settingsData.settings.PLATFORM_UPDATE_REF || "release/private-v1-rc1")}" placeholder="release/private-v1-rc1"></label>
+
+          <label>GitHub App ID<input name="GITHUB_APP_ID" value="${esc(settingsData.settings.GITHUB_APP_ID || "")}" placeholder="123456"></label>
+          <label>GitHub installation ID<input name="GITHUB_APP_INSTALLATION_ID" value="${esc(settingsData.settings.GITHUB_APP_INSTALLATION_ID || "")}" placeholder="12345678"></label>
+          <label>GitHub App private key (base64)
+            <input name="GITHUB_APP_PRIVATE_KEY_BASE64" type="password" placeholder="${settingsData.settings.GITHUB_APP_PRIVATE_KEY_BASE64_CONFIGURED ? "Configured — leave blank to keep" : "Base64-encoded PEM private key"}">
+          </label>
+          <label>GitHub webhook secret
+            <input name="GITHUB_WEBHOOK_SECRET" type="password" placeholder="${settingsData.settings.GITHUB_WEBHOOK_SECRET_CONFIGURED ? "Configured — leave blank to keep" : "32+ character secret"}">
+          </label>
+          <label>Fallback GitHub PAT
+            <input name="GITHUB_TOKEN" type="password" placeholder="${settingsData.settings.GITHUB_TOKEN_CONFIGURED ? "Configured — App credentials take priority" : "Optional fallback only"}">
+          </label>
+
+          <label>Restic repository<input name="RESTIC_REPOSITORY" value="${esc(settingsData.settings.RESTIC_REPOSITORY || "")}" placeholder="s3:s3.example.com/bucket/path"></label>
+          <label>Restic password
+            <input name="RESTIC_PASSWORD" type="password" placeholder="${settingsData.settings.RESTIC_PASSWORD_CONFIGURED ? "Configured — leave blank to keep" : "Offsite backup password"}">
+          </label>
+          <label>Alert webhook<input name="ALERT_WEBHOOK_URL" value="${esc(settingsData.settings.ALERT_WEBHOOK_URL || "")}" placeholder="https://alerts.example.com/my-railway"></label>
+
+          <label>Automatic backups<select name="AUTO_BACKUPS"><option value="true" ${settingsData.settings.AUTO_BACKUPS ? "selected" : ""}>Enabled</option><option value="false" ${!settingsData.settings.AUTO_BACKUPS ? "selected" : ""}>Disabled</option></select></label>
+          <label>Pre-migration recovery backups<select name="AUTO_PREDEPLOY_BACKUPS"><option value="true" ${settingsData.settings.AUTO_PREDEPLOY_BACKUPS ? "selected" : ""}>Enabled</option><option value="false" ${!settingsData.settings.AUTO_PREDEPLOY_BACKUPS ? "selected" : ""}>Disabled</option></select></label>
+          <label>Automatic rollback<select name="AUTO_ROLLBACK"><option value="false" ${!settingsData.settings.AUTO_ROLLBACK ? "selected" : ""}>Disabled</option><option value="true" ${settingsData.settings.AUTO_ROLLBACK ? "selected" : ""}>Enabled</option></select></label>
+        </div>
+        <div class="row mt16">
+          <button class="primary" type="submit">Save & apply platform settings</button>
+          ${settingsData.settings.GITHUB_TOKEN_CONFIGURED ? '<button type="button" data-clear-platform-secret="GITHUB_TOKEN">Clear fallback PAT</button>' : ""}
+          ${settingsData.settings.RESTIC_PASSWORD_CONFIGURED ? '<button type="button" data-clear-platform-secret="RESTIC_PASSWORD">Clear restic password</button>' : ""}
+        </div>
+        <p class="muted mt12">Secret fields are write-only. Leaving a secret field blank keeps its existing value. Applying settings may briefly restart Traefik/control/worker/agent, but application containers keep running.</p>
+      </form>
+    </div>
+
+    <div class="section-head"><h3>Settings apply log</h3></div>
+    <div class="log" id="platform-settings-log">${esc(settingsData.apply?.log || "No platform settings apply has run yet.")}</div>
+
     <div class="section-head"><h3>Self deployment</h3></div>
     <div class="panel">
       <div class="p22">
@@ -700,6 +745,47 @@ async function renderPlatform() {
     <div class="log" id="platform-update-log">${esc(status.log || "No platform update has run yet.")}</div>
   `;
 
+  $("#platform-settings-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const settings = {
+      PLATFORM_HOST:String(form.get("PLATFORM_HOST") || "").trim(),
+      PUBLIC_IP:String(form.get("PUBLIC_IP") || "").trim(),
+      ACME_EMAIL:String(form.get("ACME_EMAIL") || "").trim(),
+      PLATFORM_UPDATE_REF:String(form.get("PLATFORM_UPDATE_REF") || "").trim(),
+      GITHUB_APP_ID:String(form.get("GITHUB_APP_ID") || "").trim(),
+      GITHUB_APP_INSTALLATION_ID:String(form.get("GITHUB_APP_INSTALLATION_ID") || "").trim(),
+      RESTIC_REPOSITORY:String(form.get("RESTIC_REPOSITORY") || "").trim(),
+      ALERT_WEBHOOK_URL:String(form.get("ALERT_WEBHOOK_URL") || "").trim(),
+      AUTO_BACKUPS:String(form.get("AUTO_BACKUPS")) === "true",
+      AUTO_PREDEPLOY_BACKUPS:String(form.get("AUTO_PREDEPLOY_BACKUPS")) === "true",
+      AUTO_ROLLBACK:String(form.get("AUTO_ROLLBACK")) === "true"
+    };
+    for (const key of ["GITHUB_APP_PRIVATE_KEY_BASE64","GITHUB_WEBHOOK_SECRET","GITHUB_TOKEN","RESTIC_PASSWORD"]) {
+      const value=String(form.get(key) || "").trim();
+      if (value) settings[key]=value;
+    }
+    try {
+      await api("/api/platform/settings", {
+        method:"POST",
+        body:JSON.stringify({settings,clearKeys:[]})
+      });
+      await monitorPlatformSettingsApply();
+    } catch (error) { alert(error.message); }
+  };
+
+  $("[data-clear-platform-secret]").forEach((button) => button.onclick = async () => {
+    const key=button.dataset.clearPlatformSecret;
+    if (!confirm(`Clear ${key}? This may disable the related integration after platform services restart.`)) return;
+    try {
+      await api("/api/platform/settings", {
+        method:"POST",
+        body:JSON.stringify({settings:{},clearKeys:[key]})
+      });
+      await monitorPlatformSettingsApply();
+    } catch (error) { alert(error.message); }
+  });
+
   $("#platform-update-refresh").onclick = () => renderPlatform();
 
   if ($("#platform-update-now") && updateAvailable && !running) {
@@ -713,6 +799,38 @@ async function renderPlatform() {
       }
     };
   }
+}
+
+async function monitorPlatformSettingsApply(timeoutMs = 5 * 60_000) {
+  const deadline=Date.now()+timeoutMs;
+  let lastError=null;
+
+  while(Date.now()<deadline){
+    try{
+      const data=await api("/api/platform/settings");
+      lastError=null;
+      const log=$("#platform-settings-log");
+      if(log){
+        log.textContent=data.apply?.log || `Settings apply state: ${data.apply?.status || "unknown"}`;
+        log.scrollTop=log.scrollHeight;
+      }
+      if(data.apply?.status==="completed"){
+        await new Promise((resolve)=>setTimeout(resolve,3500));
+        await renderPlatform();
+        return;
+      }
+      if(data.apply?.status==="failed"){
+        await renderPlatform();
+        throw new Error(data.apply?.error || "Platform settings apply failed");
+      }
+    }catch(error){
+      // Brief disconnects are expected while management services are recreated.
+      lastError=error;
+    }
+    await new Promise((resolve)=>setTimeout(resolve,2000));
+  }
+
+  throw lastError || new Error("Timed out applying platform settings");
 }
 
 async function monitorPlatformUpdate(timeoutMs = 15 * 60_000) {
