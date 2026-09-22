@@ -427,12 +427,24 @@ app.post("/api/projects", auth, async (req: AuthedRequest, res) => {
     repoFullName: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
     branch: z.string().min(1).default("main"),
     domain: z.string().min(3).optional(),
-    kind: z.enum(["web", "worker"]).default("web"),
+    kind: z.enum(["web", "worker", "cron"]).default("web"),
     buildType: z.enum(["auto", "docker", "node", "python", "static"]).default("auto"),
     internalPort: z.number().int().min(1).max(65535).default(3000),
-    healthPath: z.string().startsWith("/").default("/")
+    healthPath: z.string().startsWith("/").default("/"),
+    cronExpression: z.string().min(1).optional(),
+    cronTimezone: z.string().min(1).default("UTC"),
+    cronCommand: z.string().min(1).optional(),
+    cronTimeoutSeconds: z.number().int().min(1).max(86400).default(900)
   }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  if (parsed.data.kind === "cron") {
+    if (!parsed.data.cronExpression || !parsed.data.cronCommand) {
+      return res.status(400).json({ error: "cron services require cronExpression and cronCommand" });
+    }
+    const cronError = validateCron(parsed.data.cronExpression, parsed.data.cronTimezone);
+    if (cronError) return res.status(400).json({ error: `invalid cron schedule: ${cronError}` });
+  }
 
   const projectId = id("prj");
   const serviceId = id("svc");
@@ -441,10 +453,21 @@ app.post("/api/projects", auth, async (req: AuthedRequest, res) => {
   try {
     await client.query("BEGIN");
     await client.query("INSERT INTO projects(id,name,slug) VALUES($1,$2,$3)", [projectId, parsed.data.name, projectSlug]);
+    const nextCron = parsed.data.kind === "cron" && parsed.data.cronExpression
+      ? nextCronAt(parsed.data.cronExpression, parsed.data.cronTimezone, new Date(), serviceId)
+      : null;
     await client.query(
-      `INSERT INTO services(id,project_id,name,kind,repo_full_name,branch,build_type,internal_port,health_path)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [serviceId, projectId, parsed.data.name, parsed.data.kind, parsed.data.repoFullName, parsed.data.branch, parsed.data.buildType, parsed.data.internalPort, parsed.data.healthPath]
+      `INSERT INTO services(
+        id,project_id,name,kind,repo_full_name,branch,build_type,internal_port,health_path,
+        cron_expression,cron_timezone,cron_command,cron_timeout_seconds,next_cron_at
+      )
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+      [
+        serviceId, projectId, parsed.data.name, parsed.data.kind, parsed.data.repoFullName, parsed.data.branch,
+        parsed.data.buildType, parsed.data.internalPort, parsed.data.healthPath,
+        parsed.data.cronExpression ?? null, parsed.data.cronTimezone, parsed.data.cronCommand ?? null,
+        parsed.data.cronTimeoutSeconds, nextCron
+      ]
     );
     if (parsed.data.domain) {
       await client.query("INSERT INTO domains(id,service_id,hostname) VALUES($1,$2,$3)", [id("dom"), serviceId, parsed.data.domain.toLowerCase()]);
@@ -526,13 +549,35 @@ app.patch("/api/services/:id", auth, async (req: AuthedRequest, res) => {
     healthPath: z.string().startsWith("/").optional(),
     cpuLimit: z.number().positive().max(32).optional(),
     memoryMb: z.number().int().min(64).max(131072).optional(),
-    autoDeploy: z.boolean().optional()
+    autoDeploy: z.boolean().optional(),
+    kind: z.enum(["web","worker","cron"]).optional(),
+    cronExpression: z.string().min(1).nullable().optional(),
+    cronTimezone: z.string().min(1).optional(),
+    cronCommand: z.string().min(1).nullable().optional(),
+    cronTimeoutSeconds: z.number().int().min(1).max(86400).optional()
   }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  const currentService = await one<any>("SELECT * FROM services WHERE id=$1", [String(req.params.id)]);
+  if (!currentService) return res.status(404).json({ error: "not found" });
+  const effectiveKind = parsed.data.kind ?? currentService.kind;
+  const effectiveExpression = parsed.data.cronExpression === undefined ? currentService.cron_expression : parsed.data.cronExpression;
+  const effectiveTimezone = parsed.data.cronTimezone ?? currentService.cron_timezone ?? "UTC";
+  const effectiveCommand = parsed.data.cronCommand === undefined ? currentService.cron_command : parsed.data.cronCommand;
+  if (effectiveKind === "cron") {
+    if (!effectiveExpression || !effectiveCommand) {
+      return res.status(400).json({ error: "cron services require cronExpression and cronCommand" });
+    }
+    const cronError = validateCron(effectiveExpression, effectiveTimezone, currentService.id);
+    if (cronError) return res.status(400).json({ error: `invalid cron schedule: ${cronError}` });
+  }
+
   const mapping: Record<string,string> = {
     branch:"branch", rootDirectory:"root_directory", buildType:"build_type", buildCommand:"build_command",
     startCommand:"start_command", predeployCommand:"predeploy_command", internalPort:"internal_port",
-    healthPath:"health_path", cpuLimit:"cpu_limit", memoryMb:"memory_mb", autoDeploy:"auto_deploy"
+    healthPath:"health_path", cpuLimit:"cpu_limit", memoryMb:"memory_mb", autoDeploy:"auto_deploy",
+    kind:"kind", cronExpression:"cron_expression", cronTimezone:"cron_timezone",
+    cronCommand:"cron_command", cronTimeoutSeconds:"cron_timeout_seconds"
   };
   const entries = Object.entries(parsed.data);
   if (!entries.length) return res.json({ ok: true });
@@ -543,8 +588,18 @@ app.patch("/api/services/:id", auth, async (req: AuthedRequest, res) => {
     sets.push(`${mapping[key]}=$${values.length}`);
   }
   values.push(String(req.params.id));
-  const result = await pool.query(`UPDATE services SET ${sets.join(",")}, updated_at=now() WHERE id=$${values.length} RETURNING *`, values);
+  const result = await pool.query(`UPDATE services SET ${sets.join(",")}, updated_at=now() WHERE id=${values.length} RETURNING *`, values);
   if (!result.rowCount) return res.status(404).json({ error: "not found" });
+
+  const updatedService = result.rows[0];
+  if (updatedService.kind === "cron" && updatedService.cron_expression) {
+    const nextRun = nextCronAt(updatedService.cron_expression, updatedService.cron_timezone || "UTC", new Date(), updatedService.id);
+    await pool.query("UPDATE services SET next_cron_at=$2 WHERE id=$1", [updatedService.id, nextRun]);
+    updatedService.next_cron_at = nextRun;
+  } else {
+    await pool.query("UPDATE services SET next_cron_at=NULL WHERE id=$1", [updatedService.id]);
+    updatedService.next_cron_at = null;
+  }
   await audit(req.userId ?? "unknown", "service.update", "service", String(req.params.id), parsed.data);
   res.json(result.rows[0]);
 });
