@@ -41,7 +41,9 @@ services:
   traefik:
     image: traefik:v3.5
     restart: unless-stopped
-    command: ["--configFile=/etc/traefik/traefik.yml"]
+    command:
+      - "--configFile=/etc/traefik/traefik.yml"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-admin@example.com}"
     ports:
       - "80:80"
       - "443:443"
