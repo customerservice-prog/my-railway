@@ -132,6 +132,8 @@ export type DeployPayload = {
   predeployCommand?: string|null;
   environment: Record<string,string>;
   domains: string[];
+  maintenanceEnabled?: boolean;
+  maintenanceMessage?: string|null;
   volumes?: Array<{name:string;mountPath:string;readOnly?:boolean}>;
 };
 
@@ -246,7 +248,17 @@ export async function deploy(payload: DeployPayload) {
 
     if (payload.kind === "web") {
       await waitHealthy(payload.containerName, payload.port, payload.healthPath);
-      await activateRoute(payload.serviceId, payload.containerName, payload.port, payload.domains ?? []);
+      if (payload.maintenanceEnabled) {
+        await setServiceMaintenance(
+          payload.serviceId,
+          true,
+          payload.maintenanceMessage ?? "We are performing scheduled maintenance. Please try again shortly.",
+          payload.domains ?? []
+        );
+      } else {
+        await docker(["rm","-f",maintenanceContainerName(payload.serviceId)]).catch(()=>{});
+        await activateRoute(payload.serviceId, payload.containerName, payload.port, payload.domains ?? []);
+      }
     }
 
     const grace = intEnv("DEPLOY_GRACE_SECONDS", 10);
