@@ -126,7 +126,7 @@ mkdir -p data/routes
 touch data/acme.json
 chmod 600 data/acme.json
 
-docker compose up -d --no-build postgres redis updater control worker agent
+docker compose up -d --no-build postgres redis updater control worker agent platform-backup
 
 for _ in $(seq 1 60); do
   if curl -fsS http://127.0.0.1:8080/healthz >/tmp/myrailway-health.json 2>/dev/null; then break; fi
@@ -163,6 +163,25 @@ expect_status "$STATUS" "201" "create project" /tmp/project.json
 
 curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/projects > /tmp/projects.json
 grep -q 'Smoke App' /tmp/projects.json
+
+checkpoint "control-plane backup restore drill"
+docker compose exec -T platform-backup /app/scripts/backup-platform.sh > /tmp/platform-backup.log
+PLATFORM_BACKUP_FILE="$(docker run --rm -v myrailway-backups:/backup alpine:3.20 sh -lc "ls -1t /backup/platform/control-*.sql.gz | head -1")"
+test -n "$PLATFORM_BACKUP_FILE"
+PLATFORM_BACKUP_SUM="$(basename "$PLATFORM_BACKUP_FILE").sha256"
+docker run --rm -v myrailway-backups:/backup alpine:3.20 sh -lc "cd /backup/platform && sha256sum -c '$PLATFORM_BACKUP_SUM'" | grep -q ': OK'
+
+docker compose exec -T postgres dropdb -U myrailway --if-exists myrailway_restore_test
+docker compose exec -T postgres createdb -U myrailway -O myrailway myrailway_restore_test
+
+docker run --rm -v myrailway-backups:/backup alpine:3.20 sh -lc "gzip -dc '$PLATFORM_BACKUP_FILE'"   | docker compose exec -T postgres psql -U myrailway -d myrailway_restore_test -v ON_ERROR_STOP=1 >/tmp/control-restore.log
+
+test "$(docker compose exec -T postgres psql -U myrailway -d myrailway_restore_test -Atqc "SELECT count(*) FROM users WHERE email='ci@example.com'")" = "1"
+test "$(docker compose exec -T postgres psql -U myrailway -d myrailway_restore_test -Atqc "SELECT count(*) FROM projects WHERE name='Smoke App'")" = "1"
+MIGRATION_COUNT="$(docker compose exec -T postgres psql -U myrailway -d myrailway_restore_test -Atqc "SELECT count(*) FROM schema_migrations")"
+test "$MIGRATION_COUNT" -gt 0
+docker compose exec -T postgres dropdb -U myrailway myrailway_restore_test
+
 
 # The independent updater must be reachable only through authenticated control-plane proxying.
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/platform-update-info.json -w '%{http_code}'   http://127.0.0.1:8080/api/platform/update/info)"
