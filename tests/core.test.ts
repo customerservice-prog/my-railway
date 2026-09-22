@@ -17,3 +17,11 @@ test("slug and container name remove unsafe characters", () => {
   assert.equal(slug("My Great App!"), "my-great-app");
   assert.equal(safeContainerName("MR Service/ABC"), "mr-service-abc");
 });
+
+
+test("service PATCH builds a bound id placeholder", () => {
+  const fs = require("node:fs");
+  const source = fs.readFileSync("src/control/server.ts","utf8");
+  assert.match(source, /const idPlaceholder = `\$\$\{values\.length\}`/);
+  assert.doesNotMatch(source, /WHERE id=\$\{values\.length\}/);
+});
