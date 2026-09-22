@@ -245,6 +245,26 @@ for _ in $(seq 1 60); do
 done
 node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/servers.json","utf8"));if(!x.some(s=>s.id==="local-runtime-01"&&s.online))process.exit(1)'
 
+checkpoint "launch readiness assessment"
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/readiness.json -w '%{http_code}' http://127.0.0.1:8080/api/platform/readiness)"
+expect_status "$STATUS" "200" "platform readiness endpoint" /tmp/readiness.json
+node - <<'NODE'
+const fs=require("fs");
+const r=JSON.parse(fs.readFileSync("/tmp/readiness.json","utf8"));
+if(!Array.isArray(r.checks) || !r.checks.length) process.exit(1);
+const byId=Object.fromEntries(r.checks.map(c=>[c.id,c]));
+for(const id of ["admin","totp","core-secrets","runtime","updater","github-source","offsite-backup"]) {
+  if(!byId[id]) process.exit(1);
+}
+if(byId.admin.status!=="pass") process.exit(1);
+if(byId.totp.status!=="pass") process.exit(1);
+if(byId.runtime.status!=="pass") process.exit(1);
+if(byId.updater.status!=="pass") process.exit(1);
+if(byId["github-source"].status!=="blocker") process.exit(1);
+if(byId["offsite-backup"].status!=="warning") process.exit(1);
+if(r.ready!==false || Number(r.blockers)<1) process.exit(1);
+NODE
+
 checkpoint "platform agent self-test"
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/self-test.json -w '%{http_code}' -H 'content-type: application/json' -d '{}' http://127.0.0.1:8080/api/platform/self-test)"
 expect_status "$STATUS" "202" "queue platform self-test" /tmp/self-test.json
