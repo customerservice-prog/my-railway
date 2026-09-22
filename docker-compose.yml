@@ -53,6 +53,7 @@ services:
 
   control:
     build: .
+    image: my-railway:local
     restart: unless-stopped
     command: ["node","dist/control/server.js"]
     env_file: .env
@@ -68,6 +69,7 @@ services:
 
   worker:
     build: .
+    image: my-railway:local
     restart: unless-stopped
     command: ["node","dist/worker/index.js"]
     env_file: .env
@@ -84,6 +86,7 @@ services:
 
   agent:
     build: .
+    image: my-railway:local
     restart: unless-stopped
     command: ["node","dist/agent/index.js"]
     env_file: .env
@@ -102,6 +105,7 @@ services:
 
   maintenance:
     build: .
+    image: my-railway:local
     restart: unless-stopped
     command: ["/bin/sh","-lc","sleep 300; while true; do /app/scripts/maintenance.sh || true; sleep 21600; done"]
     volumes:
@@ -110,6 +114,7 @@ services:
 
   platform-backup:
     build: .
+    image: my-railway:local
     restart: unless-stopped
     command: ["/bin/sh","-lc","while true; do /app/scripts/backup-platform.sh || true; sleep 86400; done"]
     env_file: .env
