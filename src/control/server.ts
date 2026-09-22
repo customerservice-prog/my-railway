@@ -59,11 +59,18 @@ async function audit(actor: string, action: string, targetType?: string, targetI
   );
 }
 
-async function createDeployment(serviceId: string, source: string, imageRef?: string, rollbackOf?: string) {
+async function createDeployment(
+  serviceId: string,
+  source: string,
+  imageRef?: string,
+  rollbackOf?: string,
+  runtimePort?: number | null,
+  detectedBuildType?: string | null
+) {
   const deploymentId = id("dep");
   await pool.query(
-    "INSERT INTO deployments(id,service_id,source,image_ref,rollback_of,status) VALUES($1,$2,$3,$4,$5,'QUEUED')",
-    [deploymentId, serviceId, source, imageRef ?? null, rollbackOf ?? null]
+    "INSERT INTO deployments(id,service_id,source,image_ref,rollback_of,runtime_port,detected_build_type,status) VALUES($1,$2,$3,$4,$5,$6,$7,'QUEUED')",
+    [deploymentId, serviceId, source, imageRef ?? null, rollbackOf ?? null, runtimePort ?? null, detectedBuildType ?? null]
   );
   await enqueueDeployment(deploymentId);
   return deploymentId;
@@ -356,7 +363,14 @@ app.post("/api/deployments/:id/rollback", auth, async (req: AuthedRequest, res) 
     [String(req.params.id)]
   );
   if (!target) return res.status(404).json({ error: "deployable target not found" });
-  const deploymentId = await createDeployment(target.service_id, "rollback", target.image_ref, target.id);
+  const deploymentId = await createDeployment(
+    target.service_id,
+    "rollback",
+    target.image_ref,
+    target.id,
+    target.runtime_port,
+    target.detected_build_type
+  );
   await audit(req.userId ?? "unknown", "deployment.rollback", "deployment", deploymentId, { target: target.id });
   res.status(202).json({ deploymentId });
 });
@@ -531,6 +545,36 @@ app.post("/api/backups/:id/test", auth, async (req: AuthedRequest, res) => {
   );
   await audit(req.userId ?? "unknown", "backup.test", "backup", backup.id);
   res.status(202).json({ commandId });
+});
+
+app.post("/api/backups/:id/restore", auth, async (req: AuthedRequest, res) => {
+  if (req.body?.confirm !== "RESTORE") {
+    return res.status(400).json({ error: "destructive restore requires confirm=RESTORE" });
+  }
+  const backup = await one<any>(`
+    SELECT b.*, v.docker_volume_name, v.service_id
+    FROM backups b
+    JOIN volumes v ON v.id=b.volume_id
+    WHERE b.id=$1
+  `, [String(req.params.id)]);
+  if (!backup || backup.status !== "completed" || !backup.location || !backup.server_id) {
+    return res.status(409).json({ error: "completed volume backup with a runtime location is required" });
+  }
+  const commandId = id("cmd");
+  await pool.query(
+    "INSERT INTO agent_commands(id,server_id,action,payload) VALUES($1,$2,'RESTORE_VOLUME',$3)",
+    [commandId, backup.server_id, JSON.stringify({
+      backupId: backup.id,
+      serviceId: backup.service_id,
+      volumeName: backup.docker_volume_name,
+      fileName: path.basename(backup.location)
+    })]
+  );
+  await audit(req.userId ?? "unknown", "backup.restore", "backup", backup.id, { serviceId: backup.service_id });
+  res.status(202).json({
+    commandId,
+    note: "The runtime agent will stop the service before restoring the volume. Redeploy the service after the command completes."
+  });
 });
 
 async function sendServiceCommand(serviceId: string, action: "STOP"|"RESTART") {
