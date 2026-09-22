@@ -638,9 +638,9 @@ async function renderAudit() {
   `;
 }
 
-async function openProject(id) {
+async function openProject(id, requestedServiceId = null) {
   const project = await api(`/api/projects/${encodeURIComponent(id)}`);
-  const service = project.services[0];
+  const service = project.services.find((item) => item.id === requestedServiceId) || project.services[0];
   if (!service) return;
   const dialog = $("#project-detail-dialog");
 
@@ -666,7 +666,7 @@ async function openProject(id) {
     </div>
   `).join("") || '<div class="muted">No persistent volumes attached.</div>';
 
-  const databases = (project.databases || []).map((database) => `
+  const databases = (project.databases || []).filter((database) => database.service_id === service.id).map((database) => `
     <div class="kv">
       <span><strong>${esc(database.name)}</strong><br><span class="pill">${esc(database.kind)}</span></span>
       <span>
@@ -701,6 +701,12 @@ async function openProject(id) {
     </table></div>
   ` : "";
 
+  const serviceTabs = project.services.map((item) => `
+    <button data-switch-service="${esc(item.id)}" class="${item.id === service.id ? "primary" : ""}">
+      ${esc(item.name)} · ${esc(item.kind)}
+    </button>
+  `).join("");
+
   $("#project-detail").innerHTML = `
     <div class="detail-head">
       <div>
@@ -710,6 +716,27 @@ async function openProject(id) {
       </div>
       <button class="icon-btn" id="close-detail">×</button>
     </div>
+
+    <div class="section-head"><h3>Services</h3><span class="muted">${project.services.length} total</span></div>
+    <div class="row">${serviceTabs}</div>
+    <details class="mt12">
+      <summary>+ Add service</summary>
+      <form id="add-service-form" class="form-grid mt12">
+        <label>Service name<input name="name" placeholder="Background Worker" required></label>
+        <label>GitHub repository<input name="repoFullName" placeholder="owner/repository" required></label>
+        <label>Branch<input name="branch" value="main" required></label>
+        <label>Service type<select name="kind"><option value="web">Web</option><option value="worker">Worker</option><option value="cron">Cron</option></select></label>
+        <label>Build type<select name="buildType"><option value="auto">Auto detect</option><option value="docker">Dockerfile</option><option value="node">Node.js</option><option value="python">Python</option><option value="static">Static</option></select></label>
+        <label>Internal port<input name="internalPort" type="number" value="3000" min="1" max="65535"></label>
+        <label>Health path<input name="healthPath" value="/"></label>
+        <label>Domain<input name="domain" placeholder="optional.example.com"></label>
+        <label>Cron expression<input name="cronExpression" placeholder="0 2 * * *"></label>
+        <label>Cron timezone<input name="cronTimezone" value="UTC" placeholder="America/New_York"></label>
+        <label>Cron command<input name="cronCommand" placeholder="npm run nightly"></label>
+        <label>Cron timeout seconds<input name="cronTimeoutSeconds" type="number" value="900" min="1" max="86400"></label>
+        <div class="row align-end"><button class="primary">Add service</button></div>
+      </form>
+    </details>
 
     <div class="section-head"><h3>Runtime health</h3></div>
     <div class="kv">
@@ -729,6 +756,7 @@ async function openProject(id) {
       <button class="primary" id="deploy-now">${service.kind === "cron" ? "Publish cron release" : "Deploy now"}</button>
       ${service.kind === "cron" ? "" : '<button id="restart-service">Restart</button><button id="refresh-runtime-logs">Refresh live logs</button><button id="stop-service" class="danger">Stop</button>'}
       ${service.kind === "web" ? `<button id="maintenance-toggle">${service.maintenance_enabled ? "Disable maintenance" : "Enable maintenance"}</button>` : ""}
+      ${project.services.length > 1 ? '<button id="delete-service" class="danger">Delete service</button>' : ""}
       <button id="delete-project" class="danger">Delete project</button>
     </div>
     ${service.kind === "web" ? `
@@ -811,6 +839,38 @@ async function openProject(id) {
   dialog.showModal();
   $("#close-detail").onclick = () => dialog.close();
 
+  $("[data-switch-service]", dialog).forEach((button) => button.onclick = () => {
+    openProject(id, button.dataset.switchService);
+  });
+
+  $("#add-service-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const body = Object.fromEntries(form.entries());
+    body.internalPort = Number(body.internalPort);
+    body.cronTimeoutSeconds = Number(body.cronTimeoutSeconds || 900);
+    if (!body.domain) delete body.domain;
+    if (!body.cronExpression) delete body.cronExpression;
+    if (!body.cronCommand) delete body.cronCommand;
+    try {
+      const created = await api(`/api/projects/${project.id}/services`, {
+        method:"POST",
+        body:JSON.stringify(body)
+      });
+      openProject(id, created.id);
+    } catch (error) { alert(error.message); }
+  };
+
+  if ($("#delete-service")) $("#delete-service").onclick = async () => {
+    if (!confirm(`Delete service "${service.name}"? Stateful resources must be removed first. Sibling services remain untouched.`)) return;
+    try {
+      const result = await api(`/api/services/${service.id}`, { method:"DELETE" });
+      if (result.commandId) await pollCommand(result.commandId).catch(() => {});
+      alert(result.note || "Service deleted.");
+      openProject(id);
+    } catch (error) { alert(error.message); }
+  };
+
   if ($("#maintenance-toggle")) $("#maintenance-toggle").onclick = async () => {
     const enabled = !service.maintenance_enabled;
     if (enabled && !confirm("Enable maintenance mode? Visitors will receive a 503 maintenance page while the real application keeps running privately.")) return;
@@ -823,7 +883,7 @@ async function openProject(id) {
         })
       });
       if (result.commandId) await pollCommand(result.commandId);
-      openProject(id);
+      openProject(id, service.id);
     } catch (error) { alert(error.message); }
   };
 
@@ -839,7 +899,7 @@ async function openProject(id) {
       });
       if (result.commandId) await pollCommand(result.commandId);
       alert("Maintenance message saved.");
-      openProject(id);
+      openProject(id, service.id);
     } catch (error) { alert(error.message); }
   };
 
@@ -915,7 +975,7 @@ async function openProject(id) {
     try {
       await api(`/api/services/${service.id}`, { method: "PATCH", body: JSON.stringify(body) });
       alert("Service settings saved.");
-      openProject(id);
+      openProject(id, service.id);
     } catch (error) { alert(error.message); }
   };
 
@@ -925,14 +985,14 @@ async function openProject(id) {
       await api(`/api/services/${service.id}/domains`, {
         method: "POST", body: JSON.stringify({ hostname: $("#new-domain").value })
       });
-      openProject(id);
+      openProject(id, service.id);
     } catch (error) { alert(error.message); }
   };
 
   $$("[data-verify-domain]", dialog).forEach((button) => button.onclick = async () => {
     try {
       await api(`/api/domains/${button.dataset.verifyDomain}/verify`, { method: "POST" });
-      openProject(id);
+      openProject(id, service.id);
     } catch (error) { alert(error.message); }
   });
   $$("[data-delete-domain]", dialog).forEach((button) => button.onclick = async () => {
@@ -940,7 +1000,7 @@ async function openProject(id) {
     try {
       const result = await api(`/api/domains/${button.dataset.deleteDomain}`, { method:"DELETE" });
       if (result.commandId) await pollCommand(result.commandId);
-      openProject(id);
+      openProject(id, service.id);
     } catch (error) { alert(error.message); }
   });
 
@@ -952,7 +1012,7 @@ async function openProject(id) {
       await api(`/api/services/${service.id}/variables/${encodeURIComponent(key)}`, {
         method: "PUT", body: JSON.stringify({ value })
       });
-      openProject(id);
+      openProject(id, service.id);
     } catch (error) { alert(error.message); }
   };
 
@@ -963,7 +1023,7 @@ async function openProject(id) {
         method: "POST",
         body: JSON.stringify({ name: $("#volume-name").value, mountPath: $("#volume-path").value })
       });
-      openProject(id);
+      openProject(id, service.id);
     } catch (error) { alert(error.message); }
   };
 
@@ -972,7 +1032,7 @@ async function openProject(id) {
       const queued = await api(`/api/volumes/${button.dataset.backupVolume}/backup`, { method: "POST" });
       await pollCommand(queued.commandId, 30 * 60_000);
       alert("Volume backup completed.");
-      openProject(id);
+      openProject(id, service.id);
     } catch (error) { alert(error.message); }
   });
 
@@ -991,7 +1051,7 @@ async function openProject(id) {
         })
       });
       await pollCommand(queued.commandId, 15 * 60_000);
-      openProject(id);
+      openProject(id, service.id);
     } catch (error) { alert(error.message); }
   };
 
@@ -1000,7 +1060,7 @@ async function openProject(id) {
       const queued = await api(`/api/databases/${button.dataset.projectDbReattach}/reattach`, { method:"POST" });
       if (queued.commandId) await pollCommand(queued.commandId, 15 * 60_000);
       alert(queued.note || "Database reattached.");
-      openProject(id);
+      openProject(id, service.id);
     } catch (error) { alert(error.message); }
   });
 
@@ -1009,7 +1069,7 @@ async function openProject(id) {
       const queued = await api(`/api/databases/${button.dataset.projectDbBackup}/backup`, { method: "POST" });
       await pollCommand(queued.commandId, 30 * 60_000);
       alert("Database backup completed.");
-      openProject(id);
+      openProject(id, service.id);
     } catch (error) { alert(error.message); }
   });
   $$("[data-project-db-delete]", dialog).forEach((button) => button.onclick = async () => {
@@ -1023,7 +1083,7 @@ async function openProject(id) {
       });
       if (result.commandId) await pollCommand(result.commandId, 10 * 60_000);
       alert(result.note || "Database removed.");
-      openProject(id);
+      openProject(id, service.id);
     } catch (error) { alert(error.message); }
   });
 
@@ -1031,7 +1091,7 @@ async function openProject(id) {
     try {
       const queued = await api(`/api/services/${service.id}/cron/run`, { method:"POST" });
       if (queued.commandId) await pollCommand(queued.commandId, 24 * 60 * 60_000);
-      openProject(id);
+      openProject(id, service.id);
     } catch (error) { alert(error.message); }
   };
 
