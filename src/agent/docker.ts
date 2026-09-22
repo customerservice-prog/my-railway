@@ -513,6 +513,7 @@ export async function restoreDatabase(payload: DatabasePayload & {fileName:strin
     return {restored:safe};
   }
 
+  const restoreContainer = `${payload.dockerName}-restore-${Date.now()}`;
   await docker(["stop",payload.dockerName],2*60_000);
   try {
     await docker([
@@ -527,11 +528,74 @@ export async function restoreDatabase(payload: DatabasePayload & {fileName:strin
         "chmod 644 /data/dump.rdb"
       ].join(" && ")
     ],5*60_000);
+
+    // Redis 7 prefers AOF when appendonly is enabled. Starting the normal managed
+    // container directly would ignore/replay around the restored RDB. Load the RDB
+    // with AOF disabled first, then generate a fresh AOF from that restored state.
+    await docker([
+      "run","-d",
+      "--name",restoreContainer,
+      "--network",network,
+      "--restart","no",
+      "-e",`REDIS_PASSWORD=${payload.password}`,
+      "-v",`${payload.volumeName}:/data`,
+      "redis:7-alpine",
+      "sh","-lc",'exec redis-server --appendonly no --requirepass "$REDIS_PASSWORD"'
+    ],2*60_000);
+
+    let tempReady=false;
+    let lastError="";
+    for(let i=0;i<60;i++){
+      try{
+        const pong=await docker([
+          "exec",restoreContainer,"sh","-lc",
+          'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli ping 2>/dev/null'
+        ],30_000);
+        if(pong.includes("PONG")){
+          tempReady=true;
+          break;
+        }
+      }catch(error){
+        lastError=error instanceof Error ? error.message : String(error);
+      }
+      await sleep(500);
+    }
+    if(!tempReady) throw new Error(`Temporary Redis restore process did not become healthy: ${lastError}`);
+
+    await docker([
+      "exec",restoreContainer,"sh","-lc",
+      'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli CONFIG SET appendonly yes >/dev/null'
+    ],2*60_000);
+
+    let rewriteReady=false;
+    for(let i=0;i<120;i++){
+      const persistence=await docker([
+        "exec",restoreContainer,"sh","-lc",
+        'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli INFO persistence 2>/dev/null'
+      ],30_000).catch(()=> "");
+      if(
+        persistence.includes("aof_enabled:1") &&
+        persistence.includes("aof_rewrite_in_progress:0") &&
+        persistence.includes("aof_last_bgrewrite_status:ok")
+      ){
+        rewriteReady=true;
+        break;
+      }
+      await sleep(500);
+    }
+    if(!rewriteReady) throw new Error("Redis AOF rewrite did not complete after restoring the RDB snapshot.");
+
+    await docker([
+      "exec",restoreContainer,"sh","-lc",
+      'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli SHUTDOWN SAVE >/dev/null 2>&1 || true'
+    ],2*60_000).catch(()=>{});
+    await docker(["rm","-f",restoreContainer],2*60_000).catch(()=>{});
+
     await docker(["start",payload.dockerName],2*60_000);
 
     let ready=false;
-    let lastError="";
-    for(let i=0;i<40;i++){
+    lastError="";
+    for(let i=0;i<60;i++){
       try{
         const pong=await docker([
           "exec",payload.dockerName,"sh","-lc",
@@ -546,8 +610,9 @@ export async function restoreDatabase(payload: DatabasePayload & {fileName:strin
       }
       await sleep(500);
     }
-    if(!ready) throw new Error(`Redis did not become healthy after restore: ${lastError}`);
+    if(!ready) throw new Error(`Redis did not become healthy after restored AOF activation: ${lastError}`);
   } catch (error) {
+    await docker(["rm","-f",restoreContainer],2*60_000).catch(()=>{});
     await docker(["start",payload.dockerName],2*60_000).catch(()=>{});
     throw error;
   }
