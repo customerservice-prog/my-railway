@@ -5,13 +5,13 @@ import { Worker } from "bullmq";
 import { pool, one, query } from "../shared/db.js";
 import { redis } from "../shared/queue.js";
 import { decryptSecret, encryptSecret } from "../shared/crypto.js";
-import { env } from "../shared/env.js";
+import { env, boolEnv, intEnv } from "../shared/env.js";
 import { getGitHubCloneToken, gitHubAuthEnvironment } from "../shared/github.js";
 import { id, safeContainerName, sleep } from "../shared/util.js";
 import { prepareDockerfile, run } from "./build.js";
 
 type Deployment = {
-  id: string; service_id: string; commit_sha: string|null; image_ref: string|null; status: string;
+  id: string; service_id: string; commit_sha: string|null; image_ref: string|null; status: string; source: string;
   project_name: string; project_slug: string;
   service_name: string; repo_full_name: string; branch: string; root_directory: string;
   build_type: "auto"|"docker"|"node"|"python"|"static"; dockerfile_path: string;
@@ -22,6 +22,10 @@ type Deployment = {
 };
 
 const registry = env("REGISTRY_URL", "local");
+const gitTimeoutMs = intEnv("GIT_TIMEOUT_SECONDS", 300) * 1000;
+const buildTimeoutMs = intEnv("BUILD_TIMEOUT_SECONDS", 1800) * 1000;
+const agentCommandTimeoutMs = intEnv("AGENT_COMMAND_TIMEOUT_SECONDS", 1800) * 1000;
+const autoPredeployBackups = boolEnv("AUTO_PREDEPLOY_BACKUPS", true);
 async function log(deploymentId: string, message: string, level="info") {
   const clean = message.slice(0, 8000);
   await pool.query("INSERT INTO deployment_logs(deployment_id,level,message) VALUES($1,$2,$3)", [deploymentId, level, clean]);
@@ -71,7 +75,7 @@ async function chooseServer(memoryMb: number) {
 }
 
 async function waitForCommand(commandId: string, deploymentId: string): Promise<any> {
-  const deadline = Date.now() + 12 * 60_000;
+  const deadline = Date.now() + agentCommandTimeoutMs;
   while (Date.now() < deadline) {
     const command = await one<any>("SELECT status,result FROM agent_commands WHERE id=$1", [commandId]);
     if (command?.status === "completed") return command.result ?? {};
@@ -87,10 +91,10 @@ async function cloneRepository(dep: Deployment, repoDir: string) {
   const gitEnv = gitHubAuthEnvironment(token);
   await status(dep.id, "CLONING");
   await log(dep.id, `Cloning ${dep.repo_full_name} @ ${dep.branch}`);
-  await run("git", ["clone","--no-tags","--depth","50","--branch",dep.branch,cloneUrl,repoDir], os.tmpdir(), (line)=>log(dep.id,line), gitEnv);
+  await run("git", ["clone","--no-tags","--depth","50","--branch",dep.branch,cloneUrl,repoDir], os.tmpdir(), (line)=>log(dep.id,line), gitEnv, gitTimeoutMs);
   if (dep.commit_sha) {
-    await run("git", ["fetch","--depth","1","origin",dep.commit_sha], repoDir, (line)=>log(dep.id,line), gitEnv);
-    await run("git", ["checkout","--detach",dep.commit_sha], repoDir, (line)=>log(dep.id,line), gitEnv);
+    await run("git", ["fetch","--depth","1","origin",dep.commit_sha], repoDir, (line)=>log(dep.id,line), gitEnv, gitTimeoutMs);
+    await run("git", ["checkout","--detach",dep.commit_sha], repoDir, (line)=>log(dep.id,line), gitEnv, gitTimeoutMs);
   } else {
     const { execFile } = await import("node:child_process");
     dep.commit_sha = await new Promise<string>((resolve,reject) => execFile("git",["rev-parse","HEAD"],{cwd:repoDir},(err,stdout)=>err?reject(err):resolve(stdout.trim())));
@@ -128,12 +132,12 @@ async function buildImage(dep: Deployment): Promise<{image:string;runtimePort:nu
       "--label", `myrailway.service=${dep.service_id}`,
       "--label", `myrailway.deployment=${dep.id}`,
       "."
-    ], workdir, (line)=>log(dep.id,line), { DOCKER_BUILDKIT: "1" });
+    ], workdir, (line)=>log(dep.id,line), { DOCKER_BUILDKIT: "1" }, buildTimeoutMs);
 
     if (!localMode) {
       await status(dep.id, "PUSHING_IMAGE");
       await log(dep.id, `Pushing image to ${registry}`);
-      await run("docker", ["push", image], workdir, (line)=>log(dep.id,line));
+      await run("docker", ["push", image], workdir, (line)=>log(dep.id,line), undefined, buildTimeoutMs);
     }
 
     await pool.query(
@@ -144,6 +148,94 @@ async function buildImage(dep: Deployment): Promise<{image:string;runtimePort:nu
     return { image, runtimePort, detected: prepared.detected };
   } finally {
     await fs.rm(repoDir, { recursive:true, force:true });
+  }
+}
+
+async function enqueueRuntimeCommand(
+  serverId: string,
+  deploymentId: string,
+  action: string,
+  payload: unknown
+) {
+  const commandId = id("cmd");
+  await pool.query(
+    "INSERT INTO agent_commands(id,server_id,deployment_id,action,payload,payload_enc) VALUES($1,$2,$3,$4,'{}'::jsonb,$5)",
+    [commandId,serverId,deploymentId,action,encryptSecret(JSON.stringify(payload))]
+  );
+  return commandId;
+}
+
+async function requireOnlineServer(serverId: string, purpose: string) {
+  const server = await one<any>(
+    "SELECT id,name,draining FROM servers WHERE id=$1 AND last_seen_at > now() - interval '45 seconds'",
+    [serverId]
+  );
+  if (!server) throw new Error(`Runtime server ${serverId} is offline; cannot ${purpose}`);
+  if (server.draining) throw new Error(`Runtime server ${server.name ?? serverId} is draining; cannot ${purpose}`);
+  return server;
+}
+
+async function createPredeployRecoveryPoint(dep: Deployment, runtimeServerId: string) {
+  if (!autoPredeployBackups) {
+    await log(dep.id, "Automatic pre-deploy backups are disabled by AUTO_PREDEPLOY_BACKUPS.");
+    return;
+  }
+
+  const databases = await query<any>(
+    `SELECT * FROM database_resources
+     WHERE service_id=$1 AND status='running'
+     ORDER BY created_at`,
+    [dep.service_id]
+  );
+
+  for (const database of databases) {
+    await requireOnlineServer(database.server_id, `back up managed ${database.kind} database ${database.name}`);
+    const backupId = id("bak");
+    await pool.query(
+      "INSERT INTO backups(id,service_id,database_id,server_id,kind,status) VALUES($1,$2,$3,$4,$5,'queued')",
+      [backupId,dep.service_id,database.id,database.server_id,`database-${database.kind}`]
+    );
+    const commandId = await enqueueRuntimeCommand(database.server_id,dep.id,"BACKUP_DATABASE",{
+      databaseId:database.id,
+      kind:database.kind,
+      dockerName:database.docker_name,
+      volumeName:database.volume_name,
+      username:database.username,
+      password:decryptSecret(database.password_enc),
+      databaseName:database.database_name,
+      serviceId:dep.service_id,
+      backupId,
+      backupName:backupId
+    });
+    await log(dep.id, `Creating pre-deploy recovery backup ${backupId} for managed database ${database.name}.`);
+    await waitForCommand(commandId,dep.id);
+    await log(dep.id, `Pre-deploy database backup ${backupId} completed.`);
+  }
+
+  const volumes = await query<any>(
+    `SELECT * FROM volumes
+     WHERE service_id=$1 AND status='attached' AND read_only=false
+     ORDER BY created_at`,
+    [dep.service_id]
+  );
+
+  if (volumes.length) await requireOnlineServer(runtimeServerId,"back up attached persistent volumes");
+
+  for (const volume of volumes) {
+    const backupId = id("bak");
+    await pool.query(
+      "INSERT INTO backups(id,service_id,volume_id,server_id,kind,status) VALUES($1,$2,$3,$4,'volume','queued')",
+      [backupId,dep.service_id,volume.id,runtimeServerId]
+    );
+    const commandId = await enqueueRuntimeCommand(runtimeServerId,dep.id,"BACKUP_VOLUME",{
+      volumeName:volume.docker_volume_name,
+      backupName:backupId,
+      backupId,
+      serviceId:dep.service_id
+    });
+    await log(dep.id, `Creating pre-deploy recovery backup ${backupId} for volume ${volume.name}.`);
+    await waitForCommand(commandId,dep.id);
+    await log(dep.id, `Pre-deploy volume backup ${backupId} completed.`);
   }
 }
 
@@ -252,6 +344,15 @@ async function processDeployment(deploymentId: string) {
       "SELECT docker_volume_name,mount_path,read_only FROM volumes WHERE service_id=$1 AND status='attached' ORDER BY created_at",
       [dep.service_id]
     );
+    const isRollback = dep.source === "rollback" || dep.source === "auto-rollback";
+    const predeployCommand = isRollback ? null : dep.predeploy_command;
+
+    if (predeployCommand) {
+      await status(dep.id, "MIGRATING");
+      await createPredeployRecoveryPoint(dep,server.id);
+      await log(dep.id, "Pre-deploy recovery point is ready; migration may proceed.");
+    }
+
     const commandId = id("cmd");
     const containerName = safeContainerName(`mr-${dep.service_id}-${dep.id.slice(-8)}`);
     const payload = {
@@ -264,7 +365,7 @@ async function processDeployment(deploymentId: string) {
       healthPath: dep.health_path,
       cpuLimit: Number(dep.cpu_limit),
       memoryMb: dep.memory_mb,
-      predeployCommand: dep.predeploy_command,
+      predeployCommand,
       environment,
       domains: domains.map((d)=>d.hostname),
       maintenanceEnabled: Boolean(dep.maintenance_enabled),
