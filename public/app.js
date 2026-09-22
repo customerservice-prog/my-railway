@@ -90,12 +90,16 @@ $("#login-form").addEventListener("submit", async (event) => {
       body: JSON.stringify({
         email: $("#login-email").value,
         password: $("#login-password").value,
-        totp: $("#login-totp").value || undefined
+        totp: $("#login-totp").value || undefined,
+        recoveryCode: $("#login-recovery").value || undefined
       })
     });
     await boot();
   } catch (error) {
-    if (error.data?.totpRequired) $("#totp-label").classList.remove("hidden");
+    if (error.data?.totpRequired) {
+      $("#totp-label").classList.remove("hidden");
+      $("#recovery-label").classList.remove("hidden");
+    }
     $("#auth-error").textContent = error.message;
   }
 });
@@ -500,11 +504,15 @@ async function renderSecurity() {
         <div class="section-head no-top"><h3>Administrator security</h3></div>
         <div class="kv"><span class="muted">Email</span><span>${esc(user.email)}</span></div>
         <div class="kv"><span class="muted">Two-factor auth</span><span><span class="pill ${user.totp_enabled ? "good" : "warn"}">${user.totp_enabled ? "enabled" : "not enabled"}</span></span></div>
-        ${user.totp_enabled ? "" : '<div class="row mt16"><button id="enroll-totp" class="primary">Set up authenticator</button></div>'}
+        <div class="kv"><span class="muted">Unused recovery codes</span><span>${esc(user.recovery_code_count || 0)}</span></div>
+        ${user.totp_enabled
+          ? '<div class="row mt16"><button id="regenerate-recovery">Generate new recovery codes</button></div>'
+          : '<div class="row mt16"><button id="enroll-totp" class="primary">Set up authenticator</button></div>'}
         <div id="totp-setup"></div>
       </div>
     </div>
   `;
+
   if ($("#enroll-totp")) $("#enroll-totp").onclick = async () => {
     try {
       const enrollment = await api("/api/auth/totp/enroll", { method: "POST" });
@@ -520,13 +528,45 @@ async function renderSecurity() {
       `;
       $("#confirm-totp").onsubmit = async (event) => {
         event.preventDefault();
-        await api("/api/auth/totp/confirm", {
+        const result = await api("/api/auth/totp/confirm", {
           method: "POST", body: JSON.stringify({ token: $("#totp-confirm-code").value })
         });
-        alert("Two-factor authentication enabled.");
+        showDialog("Save your recovery codes", `
+          <p class="muted">Each code works once. Store these somewhere separate from this server.</p>
+          <div class="log">${result.recoveryCodes.map(esc).join("\n")}</div>
+        `);
         renderSecurity();
       };
     } catch (error) { alert(error.message); }
+  };
+
+  if ($("#regenerate-recovery")) $("#regenerate-recovery").onclick = () => {
+    $("#totp-setup").innerHTML = `
+      <div class="section-head"><h3>Generate new recovery codes</h3></div>
+      <p class="muted">This invalidates every existing recovery code.</p>
+      <form id="recovery-regenerate-form" class="form-grid">
+        <label>Current password<input id="recovery-password" type="password" required></label>
+        <label>Authenticator code<input id="recovery-totp" inputmode="numeric" required></label>
+        <div class="row"><button class="primary">Generate codes</button></div>
+      </form>
+    `;
+    $("#recovery-regenerate-form").onsubmit = async (event) => {
+      event.preventDefault();
+      try {
+        const result = await api("/api/auth/recovery-codes/regenerate", {
+          method:"POST",
+          body:JSON.stringify({
+            password:$("#recovery-password").value,
+            totp:$("#recovery-totp").value
+          })
+        });
+        showDialog("New recovery codes", `
+          <p class="muted">Previous recovery codes are now invalid.</p>
+          <div class="log">${result.recoveryCodes.map(esc).join("\n")}</div>
+        `);
+        renderSecurity();
+      } catch (error) { alert(error.message); }
+    };
   };
 }
 
