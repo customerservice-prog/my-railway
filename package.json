@@ -27,7 +27,8 @@
     "otplib": "^12.0.1",
     "pg": "^8.16.3",
     "yaml": "^2.8.1",
-    "zod": "^4.1.11"
+    "zod": "^4.1.11",
+    "cron-parser": "^5.10.1"
   },
   "devDependencies": {
     "@types/cookie-parser": "^1.4.9",
