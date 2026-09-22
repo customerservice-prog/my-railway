@@ -16,6 +16,7 @@ const logFile = path.join(dataDir, "platform-update.log");
 const envFile = path.join(root, ".env");
 const settingsStateFile = path.join(dataDir, "platform-settings-state.json");
 const settingsLogFile = path.join(dataDir, "platform-settings.log");
+const settingsPreviousEnvFile = path.join(dataDir, "platform-settings-previous.env");
 
 if (token.length < 32) {
   console.error("PLATFORM_UPDATER_TOKEN must be configured with at least 32 characters.");
@@ -242,6 +243,11 @@ async function writePlatformSettings(input) {
 
   const temp = envFile + ".tmp";
   await fs.writeFile(temp,nextLines.join("\n"),{mode:0o600});
+
+  // Keep one last-known-good environment snapshot until the restarted management
+  // stack proves healthy. The apply script restores this automatically on failure.
+  await fs.copyFile(envFile,settingsPreviousEnvFile);
+  await fs.chmod(settingsPreviousEnvFile,0o600);
   await fs.rename(temp,envFile);
 
   const jobId = "set_" + crypto.randomBytes(10).toString("hex");
