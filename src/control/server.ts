@@ -214,6 +214,23 @@ async function redactServiceSecrets(serviceId: string | undefined, value: string
   return redacted;
 }
 
+async function redactResultValue(serviceId: string | undefined, value: unknown): Promise<unknown> {
+  if (typeof value === "string") return redactServiceSecrets(serviceId, value);
+  if (Array.isArray(value)) {
+    const output: unknown[] = [];
+    for (const item of value) output.push(await redactResultValue(serviceId, item));
+    return output;
+  }
+  if (value && typeof value === "object") {
+    const output: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      output[key] = await redactResultValue(serviceId, item);
+    }
+    return output;
+  }
+  return value;
+}
+
 async function runMetadataRetention() {
   const logDays = Math.max(1, Number(process.env.LOG_RETENTION_DAYS ?? 30) || 30);
   const commandDays = Math.max(1, Number(process.env.COMMAND_RETENTION_DAYS ?? 7) || 7);
@@ -1595,15 +1612,38 @@ app.post("/api/internal/agent/commands/claim", agentAuth, async (req, res) => {
 });
 
 app.post("/api/internal/agent/commands/:id/complete", agentAuth, async (req, res) => {
+  const commandId = String(req.params.id);
   const status = req.body?.ok ? "completed" : "failed";
   const result = req.body?.result ?? {};
-  const updated = await pool.query(
-    "UPDATE agent_commands SET status=$1,result=$2,completed_at=now() WHERE id=$3 RETURNING deployment_id,action,payload,payload_enc",
-    [status, JSON.stringify(result), String(req.params.id)]
+
+  const command = await one<any>(
+    "SELECT deployment_id,action,payload,payload_enc FROM agent_commands WHERE id=$1",
+    [commandId]
   );
-  if (!updated.rowCount) return res.status(404).json({ error: "command not found" });
-  const command = updated.rows[0];
+  if (!command) return res.status(404).json({ error: "command not found" });
+
   const commandPayload = command.payload_enc ? JSON.parse(decryptSecret(command.payload_enc)) : command.payload;
+  const serviceId = commandPayload?.serviceId ? String(commandPayload.serviceId) : undefined;
+
+  const redactedResult = await redactResultValue(serviceId, result) as Record<string, unknown>;
+  let publicResult: Record<string, unknown> = redactedResult;
+  if (command.action === "FETCH_LOGS") {
+    publicResult = {
+      containerName: redactedResult?.containerName ?? null,
+      logsStored: true
+    };
+  } else if (command.action === "RUN_CRON") {
+    publicResult = {
+      exitCode: redactedResult?.exitCode ?? null,
+      timedOut: Boolean(redactedResult?.timedOut)
+    };
+  }
+
+  await pool.query(
+    "UPDATE agent_commands SET status=$1,result=$2,result_enc=$3,completed_at=now() WHERE id=$4",
+    [status, JSON.stringify(publicResult), encryptSecret(JSON.stringify(result)), commandId]
+  );
+
   const backupId = commandPayload?.backupId;
   if (backupId && ["BACKUP_VOLUME","BACKUP_DATABASE"].includes(command.action)) {
     await pool.query(
@@ -1613,22 +1653,58 @@ app.post("/api/internal/agent/commands/:id/complete", agentAuth, async (req, res
     if(status==="failed"){
       await openAlert({
         severity:"critical",type:"backup",fingerprint:`backup:${backupId}`,
-        title:"Backup failed",message:String(result.error ?? "The runtime agent could not create the backup."),
+        title:"Backup failed",message:String((publicResult as any).error ?? "The runtime agent could not create the backup."),
         targetType:"backup",targetId:backupId
       });
     }else{
       await resolveAlert(`backup:${backupId}`);
     }
   }
+
   if (backupId && ["TEST_VOLUME_BACKUP","TEST_DATABASE_BACKUP"].includes(command.action) && status === "completed") {
     await pool.query("UPDATE backups SET restore_tested_at=now() WHERE id=$1", [backupId]);
   }
+
   if (command.action === "PROVISION_DATABASE" && commandPayload?.databaseId) {
     await pool.query(
       "UPDATE database_resources SET status=$2,updated_at=now() WHERE id=$1",
       [commandPayload.databaseId,status === "completed" ? "running" : "failed"]
     );
   }
+
+  if (command.action === "REMOVE_DATABASE" && commandPayload?.databaseId) {
+    if (status === "completed") {
+      const database = await one<any>(
+        "SELECT service_id,variable_key FROM database_resources WHERE id=$1",
+        [commandPayload.databaseId]
+      );
+      if (database?.service_id && database?.variable_key) {
+        await pool.query(
+          "DELETE FROM variables WHERE service_id=$1 AND key=$2",
+          [database.service_id,database.variable_key]
+        );
+      }
+      await pool.query("DELETE FROM database_resources WHERE id=$1", [commandPayload.databaseId]);
+      await audit("system","database.delete.completed","database",commandPayload.databaseId,{
+        deleteData:Boolean(commandPayload.deleteData)
+      });
+    } else {
+      await pool.query(
+        "UPDATE database_resources SET status='delete_failed',updated_at=now() WHERE id=$1",
+        [commandPayload.databaseId]
+      );
+      await openAlert({
+        severity:"critical",
+        type:"database_delete",
+        fingerprint:`database-delete:${commandPayload.databaseId}`,
+        title:"Managed database removal failed",
+        message:String((publicResult as any).error ?? "The runtime could not remove the managed database."),
+        targetType:"database",
+        targetId:commandPayload.databaseId
+      });
+    }
+  }
+
   if (command.action === "STOP" && commandPayload?.serviceId && status === "completed") {
     await pool.query(
       "UPDATE deployments SET status='STOPPED' WHERE service_id=$1 AND status IN ('RUNNING','UNHEALTHY')",
@@ -1640,18 +1716,20 @@ app.post("/api/internal/agent/commands/:id/complete", agentAuth, async (req, res
     );
     await resolveAlert(`service-unhealthy:${commandPayload.serviceId}`);
   }
+
   if (command.action === "FETCH_LOGS" && command.deployment_id && status === "completed") {
-    const text = await redactServiceSecrets(commandPayload?.serviceId, String(result.logs ?? "No runtime log output.").slice(-1_000_000));
+    const text = await redactServiceSecrets(serviceId, String(result.logs ?? "No runtime log output.").slice(-1_000_000));
     await pool.query(
       "INSERT INTO deployment_logs(deployment_id,level,message) VALUES($1,'runtime',$2)",
       [command.deployment_id, `[runtime ${result.containerName ?? "container"}]\n${text}`]
     );
   }
+
   if (command.action === "RUN_CRON" && commandPayload?.runId) {
     const exitCode = typeof result.exitCode === "number" ? result.exitCode : (status === "completed" ? 0 : 1);
     const runStatus = status === "completed" && exitCode === 0 ? "completed" : "failed";
     const logs = await redactServiceSecrets(
-      commandPayload.serviceId,
+      serviceId,
       String(result.logs ?? result.error ?? "").slice(-1_000_000)
     );
     await pool.query(
@@ -1676,6 +1754,7 @@ app.post("/api/internal/agent/commands/:id/complete", agentAuth, async (req, res
       });
     }
   }
+
   res.json({ ok: true });
 });
 
