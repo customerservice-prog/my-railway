@@ -728,8 +728,20 @@ async function openProject(id) {
     <div class="row">
       <button class="primary" id="deploy-now">${service.kind === "cron" ? "Publish cron release" : "Deploy now"}</button>
       ${service.kind === "cron" ? "" : '<button id="restart-service">Restart</button><button id="refresh-runtime-logs">Refresh live logs</button><button id="stop-service" class="danger">Stop</button>'}
+      ${service.kind === "web" ? `<button id="maintenance-toggle">${service.maintenance_enabled ? "Disable maintenance" : "Enable maintenance"}</button>` : ""}
       <button id="delete-project" class="danger">Delete project</button>
     </div>
+    ${service.kind === "web" ? `
+      <div class="section-head"><h3>Maintenance mode</h3></div>
+      <div class="kv">
+        <span class="muted">Public route</span>
+        <span><span class="pill ${service.maintenance_enabled ? "warn" : "good"}">${service.maintenance_enabled ? "maintenance" : "live"}</span></span>
+      </div>
+      <form id="maintenance-form" class="form-grid mt12">
+        <label>Maintenance message<input id="maintenance-message" maxlength="1000" value="${esc(service.maintenance_message || "We are performing scheduled maintenance. Please try again shortly.")}"></label>
+        <div class="row align-end"><button>${service.maintenance_enabled ? "Update message" : "Save message"}</button></div>
+      </form>
+    ` : ""}
 
     <div class="section-head"><h3>Build & runtime</h3></div>
     <form id="service-settings" class="form-grid">
@@ -798,6 +810,38 @@ async function openProject(id) {
 
   dialog.showModal();
   $("#close-detail").onclick = () => dialog.close();
+
+  if ($("#maintenance-toggle")) $("#maintenance-toggle").onclick = async () => {
+    const enabled = !service.maintenance_enabled;
+    if (enabled && !confirm("Enable maintenance mode? Visitors will receive a 503 maintenance page while the real application keeps running privately.")) return;
+    try {
+      const result = await api(`/api/services/${service.id}/maintenance`, {
+        method:"POST",
+        body:JSON.stringify({
+          enabled,
+          message:$("#maintenance-message")?.value || service.maintenance_message
+        })
+      });
+      if (result.commandId) await pollCommand(result.commandId);
+      openProject(id);
+    } catch (error) { alert(error.message); }
+  };
+
+  if ($("#maintenance-form")) $("#maintenance-form").onsubmit = async (event) => {
+    event.preventDefault();
+    try {
+      const result = await api(`/api/services/${service.id}/maintenance`, {
+        method:"POST",
+        body:JSON.stringify({
+          enabled:Boolean(service.maintenance_enabled),
+          message:$("#maintenance-message").value
+        })
+      });
+      if (result.commandId) await pollCommand(result.commandId);
+      alert("Maintenance message saved.");
+      openProject(id);
+    } catch (error) { alert(error.message); }
+  };
 
   $("#delete-project").onclick = async () => {
     if (!confirm("Delete this project from My Railway? This is allowed only after all managed databases and persistent-volume attachments have been removed.")) return;
