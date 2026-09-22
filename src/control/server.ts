@@ -59,6 +59,46 @@ async function audit(actor: string, action: string, targetType?: string, targetI
   );
 }
 
+async function publishAlert(alert: Record<string, unknown>) {
+  const url = optionalEnv("ALERT_WEBHOOK_URL");
+  if (!url) return;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source: "my-railway", ...alert }),
+      signal: AbortSignal.timeout(5000)
+    });
+  } catch (error) {
+    console.error("Alert webhook failed:", error);
+  }
+}
+
+async function openAlert(input: {
+  severity: "info"|"warning"|"critical";
+  type: string;
+  fingerprint: string;
+  title: string;
+  message: string;
+  targetType?: string;
+  targetId?: string;
+}) {
+  const alertId = id("alt");
+  const result = await pool.query(
+    `INSERT INTO alerts(id,severity,type,fingerprint,title,message,target_type,target_id)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+     ON CONFLICT (fingerprint) WHERE resolved_at IS NULL DO NOTHING
+     RETURNING *`,
+    [alertId,input.severity,input.type,input.fingerprint,input.title,input.message,input.targetType ?? null,input.targetId ?? null]
+  );
+  if (result.rowCount) await publishAlert(result.rows[0]);
+  return result.rows[0] ?? null;
+}
+
+async function resolveAlert(fingerprint: string) {
+  await pool.query("UPDATE alerts SET resolved_at=now() WHERE fingerprint=$1 AND resolved_at IS NULL", [fingerprint]);
+}
+
 async function createDeployment(
   serviceId: string,
   source: string,
@@ -464,6 +504,17 @@ app.get("/api/audit", auth, async (_req, res) => {
   res.json(await query("SELECT * FROM audit_events ORDER BY id DESC LIMIT 300"));
 });
 
+app.get("/api/alerts", auth, async (_req, res) => {
+  res.json(await query("SELECT * FROM alerts ORDER BY resolved_at NULLS FIRST, created_at DESC LIMIT 300"));
+});
+
+app.post("/api/alerts/:id/resolve", auth, async (req: AuthedRequest, res) => {
+  const result = await pool.query("UPDATE alerts SET resolved_at=now() WHERE id=$1 RETURNING *", [String(req.params.id)]);
+  if (!result.rowCount) return res.status(404).json({ error: "alert not found" });
+  await audit(req.userId ?? "unknown", "alert.resolve", "alert", String(req.params.id));
+  res.json(result.rows[0]);
+});
+
 app.get("/api/backups", auth, async (_req, res) => {
   res.json(await query(`
     SELECT b.*, v.name volume_name, p.name project_name, s.name service_name
@@ -620,7 +671,17 @@ app.post("/api/internal/agent/heartbeat", agentAuth, async (req, res) => {
     diskTotalMb: z.number().nonnegative(),
     diskFreeMb: z.number().nonnegative(),
     load1: z.number(),
-    containerCount: z.number().int().nonnegative()
+    containerCount: z.number().int().nonnegative(),
+    services: z.array(z.object({
+      serviceId: z.string().min(1),
+      deploymentId: z.string().nullable(),
+      containerName: z.string(),
+      running: z.boolean(),
+      healthy: z.boolean(),
+      statusCode: z.number().int().nullable(),
+      latencyMs: z.number().int().nonnegative().nullable(),
+      message: z.string().nullable()
+    })).max(500).default([])
   }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const d = parsed.data;
@@ -633,6 +694,86 @@ app.post("/api/internal/agent/heartbeat", agentAuth, async (req, res) => {
        container_count=excluded.container_count,last_seen_at=now()`,
     [d.id,d.name,d.agentVersion ?? null,d.cpuCount,d.memoryTotalMb,d.memoryFreeMb,d.diskTotalMb,d.diskFreeMb,d.load1,d.containerCount]
   );
+
+  await resolveAlert(`server-offline:${d.id}`);
+
+  const diskPctFree = d.diskTotalMb > 0 ? (d.diskFreeMb / d.diskTotalMb) * 100 : 100;
+  if (diskPctFree < 10) {
+    await openAlert({
+      severity: diskPctFree < 5 ? "critical" : "warning",
+      type: "disk",
+      fingerprint: `server-disk:${d.id}`,
+      title: `Low disk space on ${d.name}`,
+      message: `${diskPctFree.toFixed(1)}% disk space remains (${d.diskFreeMb} MB free).`,
+      targetType: "server",
+      targetId: d.id
+    });
+  } else {
+    await resolveAlert(`server-disk:${d.id}`);
+  }
+
+  for (const service of d.services) {
+    const health = await one<{consecutive_failures:number}>(`
+      INSERT INTO service_health(service_id,deployment_id,healthy,status_code,latency_ms,message,consecutive_failures,checked_at)
+      VALUES($1,$2,$3,$4,$5,$6,CASE WHEN $3 THEN 0 ELSE 1 END,now())
+      ON CONFLICT(service_id) DO UPDATE SET
+        deployment_id=excluded.deployment_id,
+        healthy=excluded.healthy,
+        status_code=excluded.status_code,
+        latency_ms=excluded.latency_ms,
+        message=excluded.message,
+        consecutive_failures=CASE WHEN excluded.healthy THEN 0 ELSE service_health.consecutive_failures + 1 END,
+        checked_at=now()
+      RETURNING consecutive_failures
+    `, [service.serviceId,service.deploymentId,service.healthy,service.statusCode,service.latencyMs,service.message]);
+
+    const fingerprint = `service-unhealthy:${service.serviceId}`;
+    if (service.healthy) {
+      await resolveAlert(fingerprint);
+      continue;
+    }
+
+    if ((health?.consecutive_failures ?? 0) >= 3) {
+      const alert = await openAlert({
+        severity: "critical",
+        type: "service_health",
+        fingerprint,
+        title: `Service unhealthy: ${service.serviceId}`,
+        message: service.message ?? "The runtime health probe failed three consecutive times.",
+        targetType: "service",
+        targetId: service.serviceId
+      });
+
+      if (alert && boolEnv("AUTO_ROLLBACK", false) && service.deploymentId) {
+        const activeJob = await one<any>(`
+          SELECT id FROM deployments
+          WHERE service_id=$1 AND status IN ('QUEUED','CLONING','BUILDING','PUSHING_IMAGE','PROVISIONING','STARTING','HEALTH_CHECKING','MIGRATING','ACTIVATING')
+          LIMIT 1
+        `, [service.serviceId]);
+        if (!activeJob) {
+          const previous = await one<any>(`
+            SELECT * FROM deployments
+            WHERE service_id=$1 AND id<>$2 AND image_ref IS NOT NULL AND status='SUPERSEDED'
+            ORDER BY created_at DESC LIMIT 1
+          `, [service.serviceId, service.deploymentId]);
+          if (previous) {
+            const rollbackId = await createDeployment(
+              service.serviceId,
+              "auto-rollback",
+              previous.image_ref,
+              previous.id,
+              previous.runtime_port,
+              previous.detected_build_type
+            );
+            await audit("system", "deployment.auto_rollback", "deployment", rollbackId, {
+              unhealthyDeployment: service.deploymentId,
+              previousDeployment: previous.id
+            });
+          }
+        }
+      }
+    }
+  }
   res.json({ ok: true });
 });
 
@@ -702,6 +843,28 @@ async function start() {
     }
   }
   app.listen(port, "0.0.0.0", () => console.log(`My Railway control plane listening on :${port}`));
+
+  setInterval(async () => {
+    try {
+      const offline = await query<{id:string;name:string}>(`
+        SELECT id,name FROM servers
+        WHERE last_seen_at IS NOT NULL AND last_seen_at < now() - interval '45 seconds'
+      `);
+      for (const server of offline) {
+        await openAlert({
+          severity: "critical",
+          type: "server_offline",
+          fingerprint: `server-offline:${server.id}`,
+          title: `Runtime offline: ${server.name}`,
+          message: "No agent heartbeat has been received for more than 45 seconds.",
+          targetType: "server",
+          targetId: server.id
+        });
+      }
+    } catch (error) {
+      console.error("Server monitor failed:", error);
+    }
+  }, 30_000).unref();
 }
 
 start().catch((error) => {
