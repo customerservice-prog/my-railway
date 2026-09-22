@@ -282,6 +282,18 @@ Build precedence:
 
 For anything unusual, add your own Dockerfile.
 
+Every build receives a deployment-unique release tag. The Git commit is included in the tag for traceability, but the deployment ID makes the built release unique even when the same source commit is rebuilt with a different root directory or build configuration. This prevents a newer build from silently retargeting an older rollback entry.
+
+The project screen also supports **Deploy exact commit**, which accepts a full 40-character Git SHA.
+
+Git cloning and Docker builds are time-bounded:
+
+```dotenv
+GIT_TIMEOUT_SECONDS=300
+BUILD_TIMEOUT_SECONDS=1800
+AGENT_COMMAND_TIMEOUT_SECONDS=1800
+```
+
 The default `REGISTRY_URL=local` is intentional for a single-host installation. Images stay on the Docker host, which avoids requiring an insecure local registry.
 
 For cross-host deployment, use a proper TLS/authenticated OCI registry and set `REGISTRY_URL` to it. Cross-host ingress/overlay networking is outside the current single-host production scope.
@@ -360,11 +372,30 @@ Cron runs record:
 
 Use **Run now** for a manual execution. A failed or timed-out cron run creates an alert; a later successful run resolves it.
 
+## Migrations and pre-deploy recovery points
+
+When a service has a pre-deploy command, My Railway creates recovery backups **before** the migration is allowed to run.
+
+With the default:
+
+```dotenv
+AUTO_PREDEPLOY_BACKUPS=true
+```
+
+the worker waits for successful backups of:
+
+- attached managed PostgreSQL/Redis resources;
+- attached writable persistent volumes.
+
+If any required recovery backup fails, deployment stops before the migration command and the existing release stays active.
+
+Rollback and automatic rollback deliberately **do not rerun the current pre-deploy migration command**. Application rollback and database restore remain separate operations.
+
 ## Rollbacks
 
 Every successful release retains its immutable image reference and runtime metadata.
 
-Choose **Rollback here** on a previous release to create a new deployment from that exact image without rebuilding source code.
+Choose **Rollback here** on a previous release to create a new deployment from that exact deployment-specific image without rebuilding source code.
 
 Optional:
 
