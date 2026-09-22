@@ -12,6 +12,11 @@ jobs:
         with:
           node-version: 22
       - run: npm install
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-lockfile
+          path: package-lock.json
+          retention-days: 1
       - run: npm run build
       - run: node --check public/app.js
       - run: npm test
