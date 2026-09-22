@@ -82,6 +82,39 @@ test "$STATUS" = "201"
 curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/projects > /tmp/projects.json
 grep -q 'Smoke App' /tmp/projects.json
 
+# Cross-site state-changing browser requests must be rejected.
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/cross-site.json -w '%{http_code}'   -H 'content-type: application/json'   -H 'Origin: https://evil.example'   -H 'Sec-Fetch-Site: cross-site'   -d '{"name":"Cross Site","repoFullName":"octocat/Hello-World","branch":"master","kind":"web","buildType":"auto","internalPort":3000,"healthPath":"/"}'   http://127.0.0.1:8080/api/projects)"
+test "$STATUS" = "403"
+
+# Keep a second session so session-version revocation can be verified later.
+STATUS="$(curl -sS -c /tmp/cookies-old.txt -o /tmp/login-old.json -w '%{http_code}'   -H 'content-type: application/json'   -d '{"email":"ci@example.com","password":"ci-password-123456"}'   http://127.0.0.1:8080/api/auth/login)"
+test "$STATUS" = "200"
+
+# Enable TOTP and obtain high-entropy one-time recovery codes.
+curl -fsS -b /tmp/cookies.txt -H 'content-type: application/json' -X POST   http://127.0.0.1:8080/api/auth/totp/enroll > /tmp/totp-enroll.json
+TOTP_SECRET="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/totp-enroll.json","utf8")).secret)')"
+TOTP_CODE="$(node --input-type=module -e 'import { authenticator } from "otplib"; process.stdout.write(authenticator.generate(process.argv[1]))' "$TOTP_SECRET")"
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/totp-confirm.json -w '%{http_code}'   -H 'content-type: application/json'   -d "{"token":"$TOTP_CODE"}"   http://127.0.0.1:8080/api/auth/totp/confirm)"
+test "$STATUS" = "200"
+RECOVERY_CODE="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/totp-confirm.json","utf8")).recoveryCodes[0])')"
+
+# A recovery code authenticates exactly once.
+STATUS="$(curl -sS -c /tmp/cookies-recovery.txt -o /tmp/login-recovery.json -w '%{http_code}'   -H 'content-type: application/json'   -d "{"email":"ci@example.com","password":"ci-password-123456","recoveryCode":"$RECOVERY_CODE"}"   http://127.0.0.1:8080/api/auth/login)"
+test "$STATUS" = "200"
+
+STATUS="$(curl -sS -o /tmp/login-recovery-reuse.json -w '%{http_code}'   -H 'content-type: application/json'   -d "{"email":"ci@example.com","password":"ci-password-123456","recoveryCode":"$RECOVERY_CODE"}"   http://127.0.0.1:8080/api/auth/login)"
+test "$STATUS" = "401"
+
+# Revoking sessions invalidates every older cookie while reissuing this verified session.
+TOTP_CODE="$(node --input-type=module -e 'import { authenticator } from "otplib"; process.stdout.write(authenticator.generate(process.argv[1]))' "$TOTP_SECRET")"
+STATUS="$(curl -sS -b /tmp/cookies.txt -c /tmp/cookies.txt -o /tmp/revoke.json -w '%{http_code}'   -H 'content-type: application/json'   -d "{"password":"ci-password-123456","totp":"$TOTP_CODE"}"   http://127.0.0.1:8080/api/auth/sessions/revoke)"
+test "$STATUS" = "200"
+
+STATUS="$(curl -sS -b /tmp/cookies-old.txt -o /tmp/old-session.json -w '%{http_code}' http://127.0.0.1:8080/api/overview)"
+test "$STATUS" = "401"
+curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/overview >/tmp/current-session.json
+
 STATUS="$(curl -sS -o /tmp/webhook.json -w '%{http_code}'   -H 'content-type: application/json'   -H 'x-github-delivery: ci-invalid'   -H 'x-github-event: push'   -H 'x-hub-signature-256: sha256=invalid'   -d '{"ref":"refs/heads/main"}'   http://127.0.0.1:8080/api/webhooks/github)"
 test "$STATUS" = "401"
 
