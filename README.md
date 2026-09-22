@@ -444,6 +444,21 @@ It validates:
 
 Use this after installation and after infrastructure maintenance.
 
+## Maintenance mode
+
+Web services support non-destructive maintenance mode.
+
+When enabled:
+
+- the real application container keeps running privately
+- public verified domains are switched to a small dedicated responder
+- visitors receive HTTP 503 with `Retry-After: 300`
+- the maintenance message is HTML-escaped
+- a new deployment may still build/replace the private release
+- the public route stays on maintenance until you explicitly disable it
+
+Disabling maintenance removes the responder and restores the current application route without rebuilding the app.
+
 ## Operator safety controls
 
 The dashboard supports:
