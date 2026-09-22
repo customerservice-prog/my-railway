@@ -469,6 +469,38 @@ Use **Refresh live logs** on a project.
 
 The runtime agent collects the last 300 container-log lines and stores them with deployment logs. Known configured secret values are redacted before storage.
 
+## Launch readiness gate
+
+The **Platform** screen includes a unified private-production readiness assessment.
+
+It separates:
+
+- **blockers** — issues that should prevent a real production migration;
+- **warnings** — important resilience/operational items that may not stop a disposable test workload;
+- **passes** — checks My Railway can verify automatically.
+
+Current checks include:
+
+- administrator account exists;
+- TOTP is enabled;
+- required platform secrets are non-placeholder and sufficiently strong;
+- GitHub App or fallback repository access is configured;
+- public control-plane hostname;
+- secure administrator cookie;
+- public application IP;
+- ACME certificate email;
+- control-plane DNS resolution;
+- online runtime agent;
+- independent self-update supervisor;
+- automatic application backups;
+- automatic recovery point before migrations;
+- recent recorded control-plane database backup;
+- offsite restic configuration;
+- unresolved critical alerts;
+- production runtime mode.
+
+A fresh private install is not considered ready while blockers remain.
+
 ## Platform self-deployment
 
 My Railway can deploy **itself** from the dashboard.
