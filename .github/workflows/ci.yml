@@ -13,4 +13,7 @@ jobs:
           node-version: 22
       - run: npm install
       - run: npm run build
+      - run: node --check public/app.js
       - run: npm test
+      - run: cp .env.example .env && docker compose config --quiet
+      - run: docker build -t my-railway-ci .
