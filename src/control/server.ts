@@ -839,6 +839,10 @@ app.post("/api/internal/agent/commands/claim", agentAuth, async (req, res) => {
     const command = result.rows[0];
     await client.query("UPDATE agent_commands SET status='running', claimed_at=now() WHERE id=$1", [command.id]);
     await client.query("COMMIT");
+    if (command.payload_enc) {
+      command.payload = JSON.parse(decryptSecret(command.payload_enc));
+      delete command.payload_enc;
+    }
     return res.json(command);
   } catch (error) {
     await client.query("ROLLBACK");
@@ -852,12 +856,13 @@ app.post("/api/internal/agent/commands/:id/complete", agentAuth, async (req, res
   const status = req.body?.ok ? "completed" : "failed";
   const result = req.body?.result ?? {};
   const updated = await pool.query(
-    "UPDATE agent_commands SET status=$1,result=$2,completed_at=now() WHERE id=$3 RETURNING deployment_id,action,payload",
+    "UPDATE agent_commands SET status=$1,result=$2,completed_at=now() WHERE id=$3 RETURNING deployment_id,action,payload,payload_enc",
     [status, JSON.stringify(result), String(req.params.id)]
   );
   if (!updated.rowCount) return res.status(404).json({ error: "command not found" });
   const command = updated.rows[0];
-  const backupId = command.payload?.backupId;
+  const commandPayload = command.payload_enc ? JSON.parse(decryptSecret(command.payload_enc)) : command.payload;
+  const backupId = commandPayload?.backupId;
   if (backupId && command.action === "BACKUP_VOLUME") {
     await pool.query(
       "UPDATE backups SET status=$2, location=$3, size_bytes=$4, completed_at=now() WHERE id=$1",
