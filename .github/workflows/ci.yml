@@ -28,4 +28,4 @@ jobs:
       - run: bash scripts/export-recovery.sh --help
       - run: cp .env.example .env && docker compose config --quiet
       - run: docker build -t my-railway:local .
-      - run: bash scripts/smoke-test.sh
+      - run: bash -x scripts/smoke-test.sh
