@@ -16,6 +16,33 @@ expect_status() {
   fi
 }
 
+wait_deployment() {
+  local deployment_id="$1" expected="$2" label="$3"
+  for _ in $(seq 1 360); do
+    curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/deployments > /tmp/deployments.json
+    local state
+    state="$(node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/deployments.json","utf8")).find(d=>d.id===id);process.stdout.write(x?.status||"missing")' "$deployment_id")"
+    if [ "$state" = "$expected" ]; then
+      return 0
+    fi
+    case "$state" in
+      BUILD_FAILED|DEPLOY_FAILED|CANCELLED)
+        if [ "$expected" != "$state" ]; then
+          echo "Deployment $deployment_id failed during $label with state $state" >&2
+          curl -fsS -b /tmp/cookies.txt "http://127.0.0.1:8080/api/deployments/$deployment_id/logs" >&2 || true
+          docker compose logs --tail=180 worker agent control >&2 || true
+          exit 1
+        fi
+        ;;
+    esac
+    sleep 2
+  done
+  echo "Timed out waiting for deployment $deployment_id to reach $expected during $label" >&2
+  curl -fsS -b /tmp/cookies.txt "http://127.0.0.1:8080/api/deployments/$deployment_id/logs" >&2 || true
+  docker compose logs --tail=180 worker agent control >&2 || true
+  exit 1
+}
+
 wait_command() {
   local command_id="$1" label="$2"
   for _ in $(seq 1 180); do
@@ -39,6 +66,7 @@ wait_command() {
 cd "$(dirname "$0")/.."
 
 cleanup() {
+  docker ps -aq --filter label=myrailway.service | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker ps -aq --filter label=myrailway.database | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker volume ls -q --filter name=mr-db- | xargs -r docker volume rm -f >/dev/null 2>&1 || true
   docker compose down -v --remove-orphans >/dev/null 2>&1 || true
@@ -94,7 +122,7 @@ mkdir -p data/routes
 touch data/acme.json
 chmod 600 data/acme.json
 
-docker compose up -d --no-build postgres redis updater control agent
+docker compose up -d --no-build postgres redis updater control worker agent
 
 for _ in $(seq 1 60); do
   if curl -fsS http://127.0.0.1:8080/healthz >/tmp/myrailway-health.json 2>/dev/null; then break; fi
@@ -203,6 +231,95 @@ node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/command
 
 PROJECT_ID="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/project.json","utf8")).id)')"
 SERVICE_ID="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/project.json","utf8")).serviceId)')"
+
+checkpoint "full deploy engine"
+DEPLOY_COMMIT="$(git rev-parse HEAD)"
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/deploy-project.json -w '%{http_code}'   -H 'content-type: application/json'   -d '{"name":"Deploy Engine Fixture","repoFullName":"customerservice-prog/my-railway","branch":"main","kind":"web","buildType":"node","internalPort":3000,"healthPath":"/healthz"}'   http://127.0.0.1:8080/api/projects)"
+expect_status "$STATUS" "201" "create deploy-engine fixture project" /tmp/deploy-project.json
+
+DEPLOY_PROJECT_ID="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/deploy-project.json","utf8"));process.stdout.write(x.id)')"
+DEPLOY_SERVICE_ID="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/deploy-project.json","utf8"));process.stdout.write(x.serviceId)')"
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/deploy-service-config.json -w '%{http_code}'   -X PATCH -H 'content-type: application/json'   -d '{"rootDirectory":"fixtures/deploy-good","memoryMb":256,"cpuLimit":0.5,"healthPath":"/healthz","autoDeploy":false}'   "http://127.0.0.1:8080/api/services/$DEPLOY_SERVICE_ID")"
+expect_status "$STATUS" "200" "configure deploy-engine fixture service" /tmp/deploy-service-config.json
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/deploy-secret.json -w '%{http_code}'   -X PUT -H 'content-type: application/json'   -d '{"value":"encrypted-fixture-secret"}'   "http://127.0.0.1:8080/api/services/$DEPLOY_SERVICE_ID/variables/DEPLOY_FIXTURE_VALUE")"
+expect_status "$STATUS" "200" "set deploy fixture encrypted secret" /tmp/deploy-secret.json
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/deploy-volume.json -w '%{http_code}'   -H 'content-type: application/json'   -d '{"name":"Deploy Data","mountPath":"/app/data","readOnly":false}'   "http://127.0.0.1:8080/api/services/$DEPLOY_SERVICE_ID/volumes")"
+expect_status "$STATUS" "201" "create deploy fixture persistent volume" /tmp/deploy-volume.json
+DEPLOY_VOLUME_NAME="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/deploy-volume.json","utf8"));process.stdout.write(x.dockerVolumeName)')"
+docker volume create "$DEPLOY_VOLUME_NAME" >/dev/null
+docker run --rm -v "$DEPLOY_VOLUME_NAME:/data" alpine:3.20 sh -lc 'echo mounted-fixture-volume >/data/proof.txt'
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/deploy-domain.json -w '%{http_code}'   -H 'content-type: application/json'   -d '{"hostname":"deploy-smoke.example.com"}'   "http://127.0.0.1:8080/api/services/$DEPLOY_SERVICE_ID/domains")"
+expect_status "$STATUS" "201" "create deploy fixture domain" /tmp/deploy-domain.json
+DEPLOY_DOMAIN_ID="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/deploy-domain.json","utf8"));process.stdout.write(x.id)')"
+docker compose exec -T postgres psql -U myrailway -d myrailway -v ON_ERROR_STOP=1 -c   "UPDATE domains SET verified=true,verified_at=now() WHERE id='$DEPLOY_DOMAIN_ID';" >/dev/null
+
+node -e 'require("fs").writeFileSync("/tmp/exact-deploy.json",JSON.stringify({commitSha:process.argv[1]}))' "$DEPLOY_COMMIT"
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/deploy-start.json -w '%{http_code}'   -H 'content-type: application/json' --data-binary @/tmp/exact-deploy.json   "http://127.0.0.1:8080/api/services/$DEPLOY_SERVICE_ID/deploy")"
+expect_status "$STATUS" "202" "queue exact-commit good deployment" /tmp/deploy-start.json
+GOOD_DEPLOY_ID="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/deploy-start.json","utf8")).deploymentId)')"
+wait_deployment "$GOOD_DEPLOY_ID" "RUNNING" "good exact-commit deployment"
+
+curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/deployments > /tmp/deployments-good.json
+node - <<'NODE' "$GOOD_DEPLOY_ID" "$DEPLOY_COMMIT"
+const fs=require("fs");
+const [id,sha]=process.argv.slice(2);
+const d=JSON.parse(fs.readFileSync("/tmp/deployments-good.json","utf8")).find(x=>x.id===id);
+if(!d || d.status!=="RUNNING" || d.commit_sha!==sha || !d.image_ref || d.server_id!=="local-runtime-01") process.exit(1);
+NODE
+GOOD_IMAGE="$(node -e 'const fs=require("fs");const id=process.argv[1];const d=JSON.parse(fs.readFileSync("/tmp/deployments-good.json","utf8")).find(x=>x.id===id);process.stdout.write(d.image_ref)' "$GOOD_DEPLOY_ID")"
+GOOD_CONTAINER="$(docker ps --filter "label=myrailway.deployment=$GOOD_DEPLOY_ID" --format '{{.Names}}' | head -1)"
+test -n "$GOOD_CONTAINER"
+
+docker run --rm --network myrailway curlimages/curl:8.10.1 -fsS "http://$GOOD_CONTAINER:3000/healthz" | grep -q 'healthy-good-release'
+docker run --rm --network myrailway curlimages/curl:8.10.1 -fsS "http://$GOOD_CONTAINER:3000/env" | grep -q 'encrypted-fixture-secret'
+docker run --rm --network myrailway curlimages/curl:8.10.1 -fsS "http://$GOOD_CONTAINER:3000/volume" | grep -q 'mounted-fixture-volume'
+SAFE_DEPLOY_SERVICE_ID="$(printf '%s' "$DEPLOY_SERVICE_ID" | tr '_' '-')"
+test -f "data/routes/$SAFE_DEPLOY_SERVICE_ID.yml"
+grep -q 'deploy-smoke.example.com' "data/routes/$SAFE_DEPLOY_SERVICE_ID.yml"
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/deploy-bad-config.json -w '%{http_code}'   -X PATCH -H 'content-type: application/json'   -d '{"rootDirectory":"fixtures/deploy-bad"}'   "http://127.0.0.1:8080/api/services/$DEPLOY_SERVICE_ID")"
+expect_status "$STATUS" "200" "switch fixture source to intentionally unhealthy app" /tmp/deploy-bad-config.json
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/deploy-bad-start.json -w '%{http_code}'   -H 'content-type: application/json' --data-binary @/tmp/exact-deploy.json   "http://127.0.0.1:8080/api/services/$DEPLOY_SERVICE_ID/deploy")"
+expect_status "$STATUS" "202" "queue intentionally unhealthy release" /tmp/deploy-bad-start.json
+BAD_DEPLOY_ID="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/deploy-bad-start.json","utf8")).deploymentId)')"
+wait_deployment "$BAD_DEPLOY_ID" "DEPLOY_FAILED" "bad release protection"
+
+# The failed candidate must be removed and the previous release must still be live and healthy.
+test -z "$(docker ps -aq --filter "label=myrailway.deployment=$BAD_DEPLOY_ID")"
+docker ps -q --filter "label=myrailway.deployment=$GOOD_DEPLOY_ID" | grep -q .
+docker run --rm --network myrailway curlimages/curl:8.10.1 -fsS "http://$GOOD_CONTAINER:3000/healthz" | grep -q 'healthy-good-release'
+curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/deployments > /tmp/deployments-after-bad.json
+node - <<'NODE' "$GOOD_DEPLOY_ID" "$BAD_DEPLOY_ID"
+const fs=require("fs");
+const [good,bad]=process.argv.slice(2);
+const rows=JSON.parse(fs.readFileSync("/tmp/deployments-after-bad.json","utf8"));
+if(rows.find(x=>x.id===good)?.status!=="RUNNING") process.exit(1);
+if(rows.find(x=>x.id===bad)?.status!=="DEPLOY_FAILED") process.exit(1);
+NODE
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/deploy-rollback.json -w '%{http_code}'   -H 'content-type: application/json' -d '{}'   "http://127.0.0.1:8080/api/deployments/$GOOD_DEPLOY_ID/rollback")"
+expect_status "$STATUS" "202" "queue exact-image rollback" /tmp/deploy-rollback.json
+ROLLBACK_DEPLOY_ID="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/deploy-rollback.json","utf8")).deploymentId)')"
+wait_deployment "$ROLLBACK_DEPLOY_ID" "RUNNING" "exact-image rollback"
+
+curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/deployments > /tmp/deployments-rollback.json
+node - <<'NODE' "$ROLLBACK_DEPLOY_ID" "$GOOD_DEPLOY_ID" "$GOOD_IMAGE"
+const fs=require("fs");
+const [rollback,original,image]=process.argv.slice(2);
+const d=JSON.parse(fs.readFileSync("/tmp/deployments-rollback.json","utf8")).find(x=>x.id===rollback);
+if(!d || d.status!=="RUNNING" || d.rollback_of!==original || d.image_ref!==image) process.exit(1);
+NODE
+ROLLBACK_CONTAINER="$(docker ps --filter "label=myrailway.deployment=$ROLLBACK_DEPLOY_ID" --format '{{.Names}}' | head -1)"
+test -n "$ROLLBACK_CONTAINER"
+docker run --rm --network myrailway curlimages/curl:8.10.1 -fsS "http://$ROLLBACK_CONTAINER:3000/healthz" | grep -q 'healthy-good-release'
+docker run --rm --network myrailway curlimages/curl:8.10.1 -fsS "http://$ROLLBACK_CONTAINER:3000/env" | grep -q 'encrypted-fixture-secret'
+docker run --rm --network myrailway curlimages/curl:8.10.1 -fsS "http://$ROLLBACK_CONTAINER:3000/volume" | grep -q 'mounted-fixture-volume'
 
 checkpoint "service settings binding"
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/service-update.json -w '%{http_code}' -X PATCH -H 'content-type: application/json' -d '{"memoryMb":768,"healthPath":"/"}' "http://127.0.0.1:8080/api/services/$SERVICE_ID")"
