@@ -419,7 +419,7 @@ export async function provisionDatabase(payload: DatabasePayload) {
         if (payload.kind === "postgres") {
           await docker(["exec",payload.dockerName,"sh","-lc",'PGPASSWORD="$POSTGRES_PASSWORD" pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"']);
         } else {
-          const pong = await docker(["exec",payload.dockerName,"sh","-lc",'redis-cli -a "$REDIS_PASSWORD" ping 2>/dev/null']);
+          const pong = await docker(["exec",payload.dockerName,"sh","-lc",'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli ping 2>/dev/null']);
           if (!pong.includes("PONG")) throw new Error("Redis did not return PONG");
         }
         return { dockerName:payload.dockerName, volumeName:payload.volumeName, ready:true };
@@ -470,7 +470,7 @@ export async function backupDatabase(payload: DatabasePayload & {backupName:stri
     return {location:target,sizeBytes:stat.size};
   }
 
-  await docker(["exec",payload.dockerName,"sh","-lc",'redis-cli -a "$REDIS_PASSWORD" SAVE >/dev/null 2>&1']);
+  await docker(["exec",payload.dockerName,"sh","-lc",'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli SAVE >/dev/null 2>&1']);
   const file=`${safe}.rdb`;
   const target=path.join(backupDir,file);
   await docker(["cp",`${payload.dockerName}:/data/dump.rdb`,target],5*60_000);
@@ -650,7 +650,7 @@ export async function runtimeDatabaseHealth(): Promise<DatabaseHealth[]> {
         if (kind === "postgres") {
           await docker(["exec",name,"sh","-lc",'PGPASSWORD="$POSTGRES_PASSWORD" pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'],30_000);
         } else {
-          const pong = await docker(["exec",name,"sh","-lc",'redis-cli -a "$REDIS_PASSWORD" ping 2>/dev/null'],30_000);
+          const pong = await docker(["exec",name,"sh","-lc",'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli ping 2>/dev/null'],30_000);
           if (!pong.includes("PONG")) throw new Error("Redis did not return PONG");
         }
         results.push({databaseId,dockerName:name,kind,running:true,healthy:true,message:null});
