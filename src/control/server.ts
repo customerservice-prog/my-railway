@@ -288,7 +288,7 @@ app.post("/api/projects", auth, async (req: AuthedRequest, res) => {
 });
 
 app.get("/api/projects/:id", auth, async (req, res) => {
-  const project = await one<any>("SELECT * FROM projects WHERE id=$1", [req.params.id]);
+  const project = await one<any>("SELECT * FROM projects WHERE id=$1", [String(req.params.id)]);
   if (!project) return res.status(404).json({ error: "not found" });
   const services = await query<any>("SELECT * FROM services WHERE project_id=$1 ORDER BY created_at", [project.id]);
   for (const service of services) {
@@ -300,7 +300,7 @@ app.get("/api/projects/:id", auth, async (req, res) => {
 });
 
 app.delete("/api/projects/:id", auth, async (req: AuthedRequest, res) => {
-  const project = await one<any>("DELETE FROM projects WHERE id=$1 RETURNING *", [req.params.id]);
+  const project = await one<any>("DELETE FROM projects WHERE id=$1 RETURNING *", [String(req.params.id)]);
   if (!project) return res.status(404).json({ error: "not found" });
   await audit(req.userId ?? "unknown", "project.delete", "project", project.id, { name: project.name });
   res.json({ ok: true });
@@ -334,15 +334,15 @@ app.patch("/api/services/:id", auth, async (req: AuthedRequest, res) => {
     values.push(value);
     sets.push(`${mapping[key]}=$${values.length}`);
   }
-  values.push(req.params.id);
+  values.push(String(req.params.id));
   const result = await pool.query(`UPDATE services SET ${sets.join(",")}, updated_at=now() WHERE id=$${values.length} RETURNING *`, values);
   if (!result.rowCount) return res.status(404).json({ error: "not found" });
-  await audit(req.userId ?? "unknown", "service.update", "service", req.params.id, parsed.data);
+  await audit(req.userId ?? "unknown", "service.update", "service", String(req.params.id), parsed.data);
   res.json(result.rows[0]);
 });
 
 app.post("/api/services/:id/deploy", auth, async (req: AuthedRequest, res) => {
-  const service = await one<any>("SELECT * FROM services WHERE id=$1", [req.params.id]);
+  const service = await one<any>("SELECT * FROM services WHERE id=$1", [String(req.params.id)]);
   if (!service) return res.status(404).json({ error: "service not found" });
   const deploymentId = await createDeployment(service.id, "manual");
   await audit(req.userId ?? "unknown", "deployment.create", "deployment", deploymentId, { serviceId: service.id });
@@ -352,7 +352,7 @@ app.post("/api/services/:id/deploy", auth, async (req: AuthedRequest, res) => {
 app.post("/api/deployments/:id/rollback", auth, async (req: AuthedRequest, res) => {
   const target = await one<any>(
     "SELECT d.*, s.id service_id FROM deployments d JOIN services s ON s.id=d.service_id WHERE d.id=$1 AND d.image_ref IS NOT NULL",
-    [req.params.id]
+    [String(req.params.id)]
   );
   if (!target) return res.status(404).json({ error: "deployable target not found" });
   const deploymentId = await createDeployment(target.service_id, "rollback", target.image_ref, target.id);
@@ -373,12 +373,12 @@ app.get("/api/deployments", auth, async (_req, res) => {
 
 app.get("/api/deployments/:id/logs", auth, async (req, res) => {
   const after = Number(req.query.after ?? 0);
-  const rows = await query("SELECT * FROM deployment_logs WHERE deployment_id=$1 AND id>$2 ORDER BY id LIMIT 1000", [req.params.id, after]);
+  const rows = await query("SELECT * FROM deployment_logs WHERE deployment_id=$1 AND id>$2 ORDER BY id LIMIT 1000", [String(req.params.id), after]);
   res.json(rows);
 });
 
 app.get("/api/services/:id/variables", auth, async (req, res) => {
-  const rows = await query("SELECT id,key,is_secret,created_at,updated_at FROM variables WHERE service_id=$1 ORDER BY key", [req.params.id]);
+  const rows = await query("SELECT id,key,is_secret,created_at,updated_at FROM variables WHERE service_id=$1 ORDER BY key", [String(req.params.id)]);
   res.json(rows);
 });
 
@@ -391,15 +391,15 @@ app.put("/api/services/:id/variables/:key", auth, async (req: AuthedRequest, res
   await pool.query(
     `INSERT INTO variables(id,service_id,key,value_enc,is_secret) VALUES($1,$2,$3,$4,true)
      ON CONFLICT(service_id,key) DO UPDATE SET value_enc=excluded.value_enc, updated_at=now()`,
-    [rowId, req.params.id, keyName, encryptSecret(value)]
+    [rowId, String(req.params.id), keyName, encryptSecret(value)]
   );
-  await audit(req.userId ?? "unknown", "variable.set", "service", req.params.id, { key: keyName });
+  await audit(req.userId ?? "unknown", "variable.set", "service", String(req.params.id), { key: keyName });
   res.json({ key: keyName, saved: true });
 });
 
 app.delete("/api/services/:id/variables/:key", auth, async (req: AuthedRequest, res) => {
-  await pool.query("DELETE FROM variables WHERE service_id=$1 AND key=$2", [req.params.id, String(req.params.key).toUpperCase()]);
-  await audit(req.userId ?? "unknown", "variable.delete", "service", req.params.id, { key: req.params.key });
+  await pool.query("DELETE FROM variables WHERE service_id=$1 AND key=$2", [String(req.params.id), String(req.params.key).toUpperCase()]);
+  await audit(req.userId ?? "unknown", "variable.delete", "service", String(req.params.id), { key: req.params.key });
   res.json({ ok: true });
 });
 
@@ -409,13 +409,13 @@ app.post("/api/services/:id/domains", auth, async (req: AuthedRequest, res) => {
     return res.status(400).json({ error: "invalid hostname" });
   }
   const domainId = id("dom");
-  await pool.query("INSERT INTO domains(id,service_id,hostname) VALUES($1,$2,$3)", [domainId, req.params.id, hostname]);
-  await audit(req.userId ?? "unknown", "domain.add", "service", req.params.id, { hostname });
+  await pool.query("INSERT INTO domains(id,service_id,hostname) VALUES($1,$2,$3)", [domainId, String(req.params.id), hostname]);
+  await audit(req.userId ?? "unknown", "domain.add", "service", String(req.params.id), { hostname });
   res.status(201).json({ id: domainId, hostname });
 });
 
 app.post("/api/domains/:id/verify", auth, async (req, res) => {
-  const domain = await one<any>("SELECT * FROM domains WHERE id=$1", [req.params.id]);
+  const domain = await one<any>("SELECT * FROM domains WHERE id=$1", [String(req.params.id)]);
   if (!domain) return res.status(404).json({ error: "not found" });
   const expectedIp = optionalEnv("PUBLIC_IP");
   const expectedHost = optionalEnv("PLATFORM_HOST");
@@ -515,7 +515,7 @@ app.post("/api/internal/agent/commands/:id/complete", agentAuth, async (req, res
   const result = req.body?.result ?? {};
   const updated = await pool.query(
     "UPDATE agent_commands SET status=$1,result=$2,completed_at=now() WHERE id=$3 RETURNING deployment_id",
-    [status, JSON.stringify(result), req.params.id]
+    [status, JSON.stringify(result), String(req.params.id)]
   );
   if (!updated.rowCount) return res.status(404).json({ error: "command not found" });
   res.json({ ok: true });
