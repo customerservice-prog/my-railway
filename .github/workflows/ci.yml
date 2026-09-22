@@ -16,6 +16,8 @@ jobs:
       - run: node --check public/app.js
       - run: npm test
       - run: bash -n scripts/*.sh
+      - run: bash scripts/install-host.sh --help
+      - run: bash scripts/export-recovery.sh --help
       - run: cp .env.example .env && docker compose config --quiet
       - run: docker build -t my-railway:local .
       - run: bash scripts/smoke-test.sh
