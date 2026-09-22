@@ -344,7 +344,7 @@ async function runAutomaticBackups() {
     try{
       const active=await one<any>(`
         SELECT server_id FROM deployments
-        WHERE service_id=$1 AND server_id IS NOT NULL AND status='RUNNING'
+        WHERE service_id=$1 AND server_id IS NOT NULL
         ORDER BY created_at DESC LIMIT 1
       `,[volume.service_id]);
       if(!active?.server_id) continue;
