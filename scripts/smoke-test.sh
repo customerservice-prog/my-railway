@@ -16,6 +16,14 @@ expect_status() {
   fi
 }
 
+fresh_totp() {
+  local secret="$1"
+  while [ $(( $(date +%s) % 30 )) -ge 25 ]; do
+    sleep 1
+  done
+  node --input-type=module -e 'import { authenticator } from "otplib"; process.stdout.write(authenticator.generate(process.argv[1]))' "$secret"
+}
+
 wait_deployment() {
   local deployment_id="$1" expected="$2" label="$3"
   for _ in $(seq 1 360); do
@@ -218,7 +226,7 @@ expect_status "$STATUS" "200" "second session login" /tmp/login-old.json
 # Enable TOTP and obtain high-entropy one-time recovery codes.
 curl -fsS -b /tmp/cookies.txt -H 'content-type: application/json' -X POST   http://127.0.0.1:8080/api/auth/totp/enroll > /tmp/totp-enroll.json
 TOTP_SECRET="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/totp-enroll.json","utf8")).secret)')"
-TOTP_CODE="$(node --input-type=module -e 'import { authenticator } from "otplib"; process.stdout.write(authenticator.generate(process.argv[1]))' "$TOTP_SECRET")"
+TOTP_CODE="$(fresh_totp "$TOTP_SECRET")"
 
 checkpoint "TOTP confirmation"
 node -e 'require("fs").writeFileSync("/tmp/totp-body.json",JSON.stringify({token:process.argv[1]}))' "$TOTP_CODE"
@@ -236,7 +244,7 @@ STATUS="$(curl -sS -o /tmp/login-recovery-reuse.json -w '%{http_code}' -H 'conte
 expect_status "$STATUS" "401" "recovery code cannot be reused" /tmp/login-recovery-reuse.json
 
 # Revoking sessions invalidates every older cookie while reissuing this verified session.
-TOTP_CODE="$(node --input-type=module -e 'import { authenticator } from "otplib"; process.stdout.write(authenticator.generate(process.argv[1]))' "$TOTP_SECRET")"
+TOTP_CODE="$(fresh_totp "$TOTP_SECRET")"
 checkpoint "session revocation"
 node -e 'require("fs").writeFileSync("/tmp/revoke-body.json",JSON.stringify({password:"ci-password-123456",totp:process.argv[1]}))' "$TOTP_CODE"
 STATUS="$(curl -sS -b /tmp/cookies.txt -c /tmp/cookies.txt -o /tmp/revoke.json -w '%{http_code}' -H 'content-type: application/json' --data-binary @/tmp/revoke-body.json http://127.0.0.1:8080/api/auth/sessions/revoke)"
