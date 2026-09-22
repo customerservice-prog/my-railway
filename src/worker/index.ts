@@ -52,6 +52,14 @@ async function deploymentInfo(deploymentId: string): Promise<Deployment | null> 
 }
 
 async function chooseServer(memoryMb: number) {
+  const localServerId = registry === "local" ? env("SERVER_ID", "local-runtime-01") : null;
+  if (localServerId) {
+    return one<any>(`
+      SELECT * FROM servers
+      WHERE id=$1 AND last_seen_at > now() - interval '45 seconds' AND memory_free_mb >= $2
+      LIMIT 1
+    `, [localServerId, memoryMb]);
+  }
   return one<any>(`
     SELECT * FROM servers
     WHERE last_seen_at > now() - interval '45 seconds'
