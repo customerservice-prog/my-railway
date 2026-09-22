@@ -2104,6 +2104,65 @@ app.get("/api/platform/readiness", auth, async (_req, res) => {
   });
 });
 
+app.get("/api/platform/settings", auth, async (_req, res) => {
+  try {
+    res.json(await platformUpdaterRequest("/settings"));
+  } catch (error) {
+    const status = Number((error as any)?.status ?? 503);
+    res.status(status).json({ error:error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post("/api/platform/settings", auth, async (req: AuthedRequest, res) => {
+  const parsed = z.object({
+    settings: z.object({
+      PLATFORM_HOST: z.string().max(253).optional(),
+      PUBLIC_IP: z.string().max(64).optional(),
+      ACME_EMAIL: z.string().max(320).optional(),
+      PLATFORM_UPDATE_REF: z.string().max(255).optional(),
+      GITHUB_APP_ID: z.string().max(64).optional(),
+      GITHUB_APP_INSTALLATION_ID: z.string().max(64).optional(),
+      GITHUB_APP_PRIVATE_KEY_BASE64: z.string().max(100_000).optional(),
+      GITHUB_WEBHOOK_SECRET: z.string().max(4096).optional(),
+      GITHUB_TOKEN: z.string().max(8192).optional(),
+      RESTIC_REPOSITORY: z.string().max(4096).optional(),
+      RESTIC_PASSWORD: z.string().max(4096).optional(),
+      ALERT_WEBHOOK_URL: z.string().max(4096).optional(),
+      AUTO_BACKUPS: z.boolean().optional(),
+      AUTO_PREDEPLOY_BACKUPS: z.boolean().optional(),
+      AUTO_ROLLBACK: z.boolean().optional()
+    }).default({}),
+    clearKeys: z.array(z.enum([
+      "GITHUB_APP_PRIVATE_KEY_BASE64",
+      "GITHUB_WEBHOOK_SECRET",
+      "GITHUB_TOKEN",
+      "RESTIC_PASSWORD",
+      "RESTIC_REPOSITORY",
+      "ALERT_WEBHOOK_URL"
+    ])).default([])
+  }).safeParse(req.body ?? {});
+
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  try {
+    const result = await platformUpdaterRequest("/settings", {
+      method:"POST",
+      body:JSON.stringify(parsed.data)
+    });
+    const changedKeys = [
+      ...Object.keys(parsed.data.settings),
+      ...parsed.data.clearKeys.map((key)=>`clear:${key}`)
+    ];
+    await audit(req.userId ?? "unknown","platform.settings.update","platform","settings",{
+      changedKeys
+    });
+    res.status(202).json(result);
+  } catch (error) {
+    const status = Number((error as any)?.status ?? 503);
+    res.status(status).json({ error:error instanceof Error ? error.message : String(error) });
+  }
+});
+
 app.get("/api/platform/update/info", auth, async (_req, res) => {
   try {
     res.json(await platformUpdaterRequest("/info"));
