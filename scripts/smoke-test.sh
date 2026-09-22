@@ -623,34 +623,8 @@ done
 test "$SETTINGS_APPLIED" = true
 
 # The host file, reloaded control plane, and restarted updater must all reflect the saved settings.
-grep -q '^ALERT_WEBHOOK_URL=https://example.invalid/my-railway-ci
-STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/project-delete.json -w '%{http_code}' -X DELETE "http://127.0.0.1:8080/api/projects/$PROJECT_ID")"
-expect_status "$STATUS" "200" "delete project after stateful resources are removed" /tmp/project-delete.json
-
-STATUS="$(curl -sS -o /tmp/webhook.json -w '%{http_code}'   -H 'content-type: application/json'   -H 'x-github-delivery: ci-invalid'   -H 'x-github-event: push'   -H 'x-hub-signature-256: sha256=invalid'   -d '{"ref":"refs/heads/main"}'   http://127.0.0.1:8080/api/webhooks/github)"
-expect_status "$STATUS" "401" "invalid webhook signature rejected" /tmp/webhook.json
-
-curl -sSI http://127.0.0.1:8080/ | tr -d '\r' > /tmp/headers.txt
-grep -qi '^x-frame-options: DENY$' /tmp/headers.txt
-grep -qi '^x-content-type-options: nosniff$' /tmp/headers.txt
-grep -qi '^content-security-policy:' /tmp/headers.txt
-
-echo "My Railway smoke test passed."
- .env
-grep -q '^AUTO_BACKUPS=false
-STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/project-delete.json -w '%{http_code}' -X DELETE "http://127.0.0.1:8080/api/projects/$PROJECT_ID")"
-expect_status "$STATUS" "200" "delete project after stateful resources are removed" /tmp/project-delete.json
-
-STATUS="$(curl -sS -o /tmp/webhook.json -w '%{http_code}'   -H 'content-type: application/json'   -H 'x-github-delivery: ci-invalid'   -H 'x-github-event: push'   -H 'x-hub-signature-256: sha256=invalid'   -d '{"ref":"refs/heads/main"}'   http://127.0.0.1:8080/api/webhooks/github)"
-expect_status "$STATUS" "401" "invalid webhook signature rejected" /tmp/webhook.json
-
-curl -sSI http://127.0.0.1:8080/ | tr -d '\r' > /tmp/headers.txt
-grep -qi '^x-frame-options: DENY$' /tmp/headers.txt
-grep -qi '^x-content-type-options: nosniff$' /tmp/headers.txt
-grep -qi '^content-security-policy:' /tmp/headers.txt
-
-echo "My Railway smoke test passed."
- .env
+grep -q '^ALERT_WEBHOOK_URL=https://example.invalid/my-railway-ci$' .env
+grep -q '^AUTO_BACKUPS=false$' .env
 node - <<'NODE'
 const fs=require("fs");
 const x=JSON.parse(fs.readFileSync("/tmp/platform-settings-after.json","utf8"));
@@ -660,7 +634,8 @@ if(x.settings.AUTO_PREDEPLOY_BACKUPS!==true) process.exit(1);
 NODE
 
 for _ in $(seq 1 60); do
-  if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 &&      curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/platform/update/info >/tmp/updater-after-settings.json 2>/dev/null; then
+  if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && \
+     curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/platform/update/info >/tmp/updater-after-settings.json 2>/dev/null; then
     break
   fi
   sleep 2
