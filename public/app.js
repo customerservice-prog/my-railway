@@ -236,6 +236,7 @@ function deploymentTable(rows) {
       <td>${fmt(deployment.created_at)}</td>
       <td>
         <button data-logs="${esc(deployment.id)}">Logs</button>
+        ${deployment.status === "QUEUED" ? `<button data-cancel-deploy="${esc(deployment.id)}">Cancel</button>` : ""}
         ${deployment.image_ref ? `<button data-rollback="${esc(deployment.id)}">Rollback here</button>` : ""}
       </td>
     </tr>
@@ -252,8 +253,15 @@ function deploymentTable(rows) {
 }
 
 function wireDeployments(root = document) {
-  $$("[data-logs]", root).forEach((button) => button.onclick = () => showLogs(button.dataset.logs));
-  $$("[data-rollback]", root).forEach((button) => button.onclick = () => rollback(button.dataset.rollback));
+  $("[data-logs]", root).forEach((button) => button.onclick = () => showLogs(button.dataset.logs));
+  $("[data-cancel-deploy]", root).forEach((button) => button.onclick = async () => {
+    if (!confirm("Cancel this queued deployment?")) return;
+    try {
+      await api(`/api/deployments/${button.dataset.cancelDeploy}/cancel`, { method:"POST" });
+      await render();
+    } catch (error) { alert(error.message); }
+  });
+  $("[data-rollback]", root).forEach((button) => button.onclick = () => rollback(button.dataset.rollback));
 }
 
 async function renderOverview() {
@@ -325,15 +333,31 @@ async function renderServers() {
       <td>${esc(server.disk_free_mb || 0)} / ${esc(server.disk_total_mb || 0)} MB</td>
       <td>${esc(server.container_count || 0)}</td>
       <td>${fmt(server.last_seen_at)}</td>
+      <td>
+        <button data-drain-server="${esc(server.id)}" data-draining="${server.draining ? "true" : "false"}">
+          ${server.draining ? "Resume scheduling" : "Drain"}
+        </button>
+      </td>
     </tr>
   `).join("");
 
   $("#content").innerHTML = `
     <div class="panel"><table class="table">
-      <thead><tr><th>Server</th><th>Status</th><th>CPU</th><th>Memory free</th><th>Disk free</th><th>Containers</th><th>Last seen</th></tr></thead>
-      <tbody>${body || '<tr><td colspan="7" class="empty">No agents connected.</td></tr>'}</tbody>
+      <thead><tr><th>Server</th><th>Status</th><th>CPU</th><th>Memory free</th><th>Disk free</th><th>Containers</th><th>Last seen</th><th></th></tr></thead>
+      <tbody>${body || '<tr><td colspan="8" class="empty">No agents connected.</td></tr>'}</tbody>
     </table></div>
   `;
+  $("[data-drain-server]").forEach((button) => button.onclick = async () => {
+    const next = button.dataset.draining !== "true";
+    const label = next ? "Drain this server so no new work is scheduled here?" : "Resume scheduling on this server?";
+    if (!confirm(label)) return;
+    try {
+      await api(`/api/servers/${button.dataset.drainServer}/drain`, {
+        method:"POST", body:JSON.stringify({draining:next})
+      });
+      renderServers();
+    } catch (error) { alert(error.message); }
+  });
 }
 
 async function renderDatabases() {
@@ -346,7 +370,10 @@ async function renderDatabases() {
       <td><span class="pill ${statusClass(database.status)}">${esc(database.status)}</span></td>
       <td class="mono">${esc(database.docker_name)}</td>
       <td class="mono">${esc(database.variable_key)}</td>
-      <td><button data-db-backup="${esc(database.id)}">Backup now</button></td>
+      <td>
+        <button data-db-backup="${esc(database.id)}">Backup now</button>
+        <button data-delete-db="${esc(database.id)}">Remove</button>
+      </td>
     </tr>
   `).join("");
   $("#content").innerHTML = `
@@ -355,11 +382,25 @@ async function renderDatabases() {
       <tbody>${body || '<tr><td colspan="7" class="empty">No managed databases yet. Add one from a project.</td></tr>'}</tbody>
     </table></div>
   `;
-  $$("[data-db-backup]").forEach((button) => button.onclick = async () => {
+  $("[data-db-backup]").forEach((button) => button.onclick = async () => {
     try {
       const queued = await api(`/api/databases/${button.dataset.dbBackup}/backup`, { method: "POST" });
       await pollCommand(queued.commandId, 30 * 60_000);
       alert("Database backup completed.");
+      renderDatabases();
+    } catch (error) { alert(error.message); }
+  });
+  $("[data-delete-db]").forEach((button) => button.onclick = async () => {
+    const deleteData = confirm("Remove this managed database?\n\nOK = remove container AND permanently delete its Docker data volume.\nCancel = keep the data volume.");
+    const proceed = deleteData || confirm("Keep the data volume but remove the managed database container and platform record?");
+    if (!proceed) return;
+    try {
+      const result = await api(`/api/databases/${button.dataset.deleteDb}`, {
+        method:"DELETE",
+        body:JSON.stringify({confirm: deleteData ? "DELETE_DATA" : "KEEP_DATA"})
+      });
+      if (result.commandId) await pollCommand(result.commandId, 10 * 60_000);
+      alert(result.note || "Database removed.");
       renderDatabases();
     } catch (error) { alert(error.message); }
   });
@@ -449,7 +490,7 @@ async function renderSecurity() {
   const { user } = await api("/api/auth/me");
   $("#content").innerHTML = `
     <div class="panel narrow">
-      <div style="padding:22px">
+      <div class="p22">
         <div class="section-head no-top"><h3>Administrator security</h3></div>
         <div class="kv"><span class="muted">Email</span><span>${esc(user.email)}</span></div>
         <div class="kv"><span class="muted">Two-factor auth</span><span><span class="pill ${user.totp_enabled ? "good" : "warn"}">${user.totp_enabled ? "enabled" : "not enabled"}</span></span></div>
@@ -466,7 +507,7 @@ async function renderSecurity() {
         <p class="muted">Add this secret to your authenticator app, then enter the six-digit code to confirm.</p>
         <div class="kv"><span class="muted">Secret</span><span class="mono">${esc(enrollment.secret)}</span></div>
         <div class="kv"><span class="muted">URI</span><span class="mono break-anywhere">${esc(enrollment.uri)}</span></div>
-        <form id="confirm-totp" class="row" style="margin-top:16px">
+        <form id="confirm-totp" class="row mt16">
           <input id="totp-confirm-code" inputmode="numeric" placeholder="123456" class="max180" required>
           <button class="primary">Enable 2FA</button>
         </form>
@@ -504,7 +545,11 @@ async function openProject(id) {
   const domains = service.domains.map((domain) => `
     <div class="kv">
       <span class="mono">${esc(domain.hostname)}</span>
-      <span><span class="pill ${domain.verified ? "good" : "warn"}">${domain.verified ? "verified" : "waiting for DNS"}</span> <button data-verify-domain="${esc(domain.id)}">Verify</button></span>
+      <span>
+        <span class="pill ${domain.verified ? "good" : "warn"}">${domain.verified ? "verified" : "waiting for DNS"}</span>
+        <button data-verify-domain="${esc(domain.id)}">Verify</button>
+        <button data-delete-domain="${esc(domain.id)}">Remove</button>
+      </span>
     </div>
   `).join("") || '<div class="muted">No domains configured.</div>';
 
@@ -522,7 +567,12 @@ async function openProject(id) {
   const databases = (project.databases || []).map((database) => `
     <div class="kv">
       <span><strong>${esc(database.name)}</strong><br><span class="pill">${esc(database.kind)}</span></span>
-      <span><span class="pill ${statusClass(database.status)}">${esc(database.status)}</span> <span class="mono">${esc(database.variable_key)}</span> <button data-project-db-backup="${esc(database.id)}">Backup</button></span>
+      <span>
+        <span class="pill ${statusClass(database.status)}">${esc(database.status)}</span>
+        <span class="mono">${esc(database.variable_key)}</span>
+        <button data-project-db-backup="${esc(database.id)}">Backup</button>
+        <button data-project-db-delete="${esc(database.id)}">Remove</button>
+      </span>
     </div>
   `).join("") || '<div class="muted">No managed databases.</div>';
 
@@ -669,9 +719,17 @@ async function openProject(id) {
     } catch (error) { alert(error.message); }
   };
 
-  $$("[data-verify-domain]", dialog).forEach((button) => button.onclick = async () => {
+  $("[data-verify-domain]", dialog).forEach((button) => button.onclick = async () => {
     try {
       await api(`/api/domains/${button.dataset.verifyDomain}/verify`, { method: "POST" });
+      openProject(id);
+    } catch (error) { alert(error.message); }
+  });
+  $("[data-delete-domain]", dialog).forEach((button) => button.onclick = async () => {
+    if (!confirm("Remove this domain from the service and live route?")) return;
+    try {
+      const result = await api(`/api/domains/${button.dataset.deleteDomain}`, { method:"DELETE" });
+      if (result.commandId) await pollCommand(result.commandId);
       openProject(id);
     } catch (error) { alert(error.message); }
   });
@@ -727,11 +785,25 @@ async function openProject(id) {
     } catch (error) { alert(error.message); }
   };
 
-  $$("[data-project-db-backup]", dialog).forEach((button) => button.onclick = async () => {
+  $("[data-project-db-backup]", dialog).forEach((button) => button.onclick = async () => {
     try {
       const queued = await api(`/api/databases/${button.dataset.projectDbBackup}/backup`, { method: "POST" });
       await pollCommand(queued.commandId, 30 * 60_000);
       alert("Database backup completed.");
+      openProject(id);
+    } catch (error) { alert(error.message); }
+  });
+  $("[data-project-db-delete]", dialog).forEach((button) => button.onclick = async () => {
+    const deleteData = confirm("Remove this database?\n\nOK permanently deletes its data volume. Cancel keeps the data volume.");
+    const proceed = deleteData || confirm("Keep the data volume and remove only the managed resource?");
+    if (!proceed) return;
+    try {
+      const result = await api(`/api/databases/${button.dataset.projectDbDelete}`, {
+        method:"DELETE",
+        body:JSON.stringify({confirm: deleteData ? "DELETE_DATA" : "KEEP_DATA"})
+      });
+      if (result.commandId) await pollCommand(result.commandId, 10 * 60_000);
+      alert(result.note || "Database removed.");
       openProject(id);
     } catch (error) { alert(error.message); }
   });
