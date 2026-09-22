@@ -139,12 +139,16 @@ Deploy code that starts but fails its configured health endpoint.
 
 ## Rollback test
 
+- [ ] Rebuild the same Git commit with a different service root/build configuration.
+- [ ] Confirm the old and new deployments have different image references.
 - [ ] Keep at least two successful release images.
 - [ ] Roll back to the older one.
 - [ ] Rollback does not rebuild source.
 - [ ] Exact old runtime port is reused.
 - [ ] Traffic switches to rollback release.
 - [ ] Rollback release health succeeds.
+- [ ] Set the current pre-deploy command to an intentionally failing command.
+- [ ] Rollback still succeeds without running that migration command.
 
 ## Restart/reboot test
 
@@ -217,7 +221,11 @@ On a non-production test host or controlled filesystem:
 
 For applications using schema migrations:
 
+- [ ] `AUTO_PREDEPLOY_BACKUPS=true`.
 - [ ] Pre-deploy command is configured.
+- [ ] Attached writable-volume recovery backup completes before migration.
+- [ ] Attached managed-database recovery backup completes before migration.
+- [ ] A forced backup failure prevents migration from starting.
 - [ ] Migration failure prevents route cutover.
 - [ ] Migration is backward-compatible with the previous application version, **or**
 - [ ] auto rollback remains disabled.
@@ -290,7 +298,13 @@ Latest main-branch CI must pass:
 - [ ] shell syntax
 - [ ] Compose config
 - [ ] Docker image build
+- [ ] updater Docker image build
 - [ ] live control-plane smoke test
+- [ ] real repository clone/build/deploy/health drill
+- [ ] intentionally unhealthy release keeps prior release live
+- [ ] exact-image rollback drill
+- [ ] pre-migration recovery-backup drill
+- [ ] full synthetic platform self-update drill
 
 ## First real migration
 
