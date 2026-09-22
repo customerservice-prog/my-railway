@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>My Railway</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="auth" class="auth-shell hidden">
+    <div class="auth-card">
+      <div class="brand-mark">MR</div>
+      <h1>My Railway</h1>
+      <p class="muted">Private application cloud</p>
+      <form id="login-form">
+        <label>Email<input id="login-email" type="email" value="admin@localhost" autocomplete="username" /></label>
+        <label>Password<input id="login-password" type="password" autocomplete="current-password" required /></label>
+        <label id="totp-label" class="hidden">Authenticator code<input id="login-totp" inputmode="numeric" autocomplete="one-time-code" /></label>
+        <button class="primary" type="submit">Sign in</button>
+      </form>
+      <details>
+        <summary>First-time setup</summary>
+        <form id="bootstrap-form">
+          <label>Admin email<input id="bootstrap-email" type="email" value="admin@localhost" /></label>
+          <label>New password<input id="bootstrap-password" type="password" minlength="12" required /></label>
+          <button type="submit">Initialize platform</button>
+        </form>
+      </details>
+      <div id="auth-error" class="error"></div>
+    </div>
+  </div>
+
+  <div id="app" class="shell hidden">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark small">MR</span><span>My Railway</span></div>
+      <nav>
+        <button data-view="overview" class="nav active">Overview</button>
+        <button data-view="projects" class="nav">Projects</button>
+        <button data-view="deployments" class="nav">Deployments</button>
+        <button data-view="servers" class="nav">Servers</button>
+        <button data-view="backups" class="nav">Backups</button>
+        <button data-view="audit" class="nav">Audit log</button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="status-dot"><i></i><span id="platform-status">Checking platform</span></div>
+        <button id="logout" class="ghost">Sign out</button>
+      </div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div><div class="eyebrow">PRIVATE CLOUD</div><h2 id="view-title">Overview</h2></div>
+        <div class="top-actions"><button id="refresh" class="ghost">Refresh</button><button id="new-project" class="primary">+ New project</button></div>
+      </header>
+      <section id="content"></section>
+    </main>
+  </div>
+
+  <dialog id="project-dialog">
+    <form method="dialog" id="project-form">
+      <div class="dialog-head"><div><div class="eyebrow">NEW SERVICE</div><h3>Deploy a repository</h3></div><button value="cancel" class="icon-btn">×</button></div>
+      <div class="form-grid">
+        <label>Project name<input name="name" placeholder="RentSketch" required /></label>
+        <label>GitHub repository<input name="repoFullName" placeholder="owner/repository" required /></label>
+        <label>Branch<input name="branch" value="main" required /></label>
+        <label>Domain<input name="domain" placeholder="app.example.com" /></label>
+        <label>Build type<select name="buildType"><option value="auto">Auto detect</option><option value="docker">Dockerfile</option><option value="node">Node.js</option><option value="python">Python</option><option value="static">Static</option></select></label>
+        <label>Internal port<input name="internalPort" type="number" value="3000" min="1" max="65535" /></label>
+        <label>Health path<input name="healthPath" value="/" /></label>
+        <label>Service type<select name="kind"><option value="web">Web service</option><option value="worker">Worker</option></select></label>
+      </div>
+      <div class="dialog-actions"><button value="cancel">Cancel</button><button class="primary" value="default">Create project</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="project-detail-dialog"><div id="project-detail"></div></dialog>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

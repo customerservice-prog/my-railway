@@ -1,0 +1,127 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: myrailway
+      POSTGRES_USER: myrailway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-now}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [myrailway]
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U myrailway -d myrailway"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server","--appendonly","yes","--maxmemory-policy","noeviction"]
+    volumes:
+      - redis-data:/data
+    networks: [myrailway]
+    healthcheck:
+      test: ["CMD","redis-cli","ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  registry:
+    image: registry:2
+    restart: unless-stopped
+    profiles: ["registry"]
+    volumes:
+      - registry-data:/var/lib/registry
+    ports:
+      - "127.0.0.1:5000:5000"
+    networks: [myrailway]
+
+  traefik:
+    image: traefik:v3.5
+    restart: unless-stopped
+    command: ["--configFile=/etc/traefik/traefik.yml"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./data/routes:/etc/traefik/dynamic:ro
+      - ./data/acme.json:/etc/traefik/acme.json
+    networks: [myrailway]
+
+  control:
+    build: .
+    restart: unless-stopped
+    command: ["node","dist/control/server.js"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://myrailway:${POSTGRES_PASSWORD:-change-me-now}@postgres:5432/myrailway
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks: [myrailway]
+
+  worker:
+    build: .
+    restart: unless-stopped
+    command: ["node","dist/worker/index.js"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://myrailway:${POSTGRES_PASSWORD:-change-me-now}@postgres:5432/myrailway
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      control: { condition: service_started }
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [myrailway]
+
+  agent:
+    build: .
+    restart: unless-stopped
+    command: ["node","dist/agent/index.js"]
+    env_file: .env
+    environment:
+      CONTROL_PLANE_URL: http://control:8080
+      TRAEFIK_ROUTES_DIR: /var/lib/myrailway/routes
+      BACKUP_DIR: /var/lib/myrailway/backups
+    depends_on:
+      control: { condition: service_started }
+      traefik: { condition: service_started }
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data/routes:/var/lib/myrailway/routes
+      - ./data/backups:/var/lib/myrailway/backups
+    networks: [myrailway]
+
+  platform-backup:
+    build: .
+    restart: unless-stopped
+    command: ["/bin/sh","-lc","while true; do /app/scripts/backup-platform.sh || true; sleep 86400; done"]
+    env_file: .env
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me-now}
+      DATABASE_HOST: postgres
+      DATABASE_NAME: myrailway
+      DATABASE_USER: myrailway
+      BACKUP_DIR: /backups
+    depends_on:
+      postgres: { condition: service_healthy }
+    volumes:
+      - ./data/backups:/backups
+    networks: [myrailway]
+
+networks:
+  myrailway:
+    name: myrailway
+
+volumes:
+  postgres-data:
+  redis-data:
+  registry-data:

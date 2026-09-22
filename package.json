@@ -1,0 +1,41 @@
+{
+  "name": "my-railway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:control": "tsx watch src/control/server.ts",
+    "dev:worker": "tsx watch src/worker/index.ts",
+    "dev:agent": "tsx watch src/agent/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start:control": "node dist/control/server.js",
+    "start:worker": "node dist/worker/index.js",
+    "start:agent": "node dist/agent/index.js",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "check": "npm run build && npm test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "bullmq": "^5.58.5",
+    "cookie-parser": "^1.4.7",
+    "express": "^5.1.0",
+    "ioredis": "^5.7.0",
+    "jsonwebtoken": "^9.0.2",
+    "otplib": "^12.0.1",
+    "pg": "^8.16.3",
+    "yaml": "^2.8.1",
+    "zod": "^4.1.11"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.9",
+    "@types/express": "^5.0.3",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^24.5.2",
+    "@types/pg": "^8.15.5",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
