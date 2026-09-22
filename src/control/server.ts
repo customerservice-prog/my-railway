@@ -134,6 +134,12 @@ async function redactServiceSecrets(serviceId: string | undefined, value: string
 async function runAutomaticBackups() {
   if (!boolEnv("AUTO_BACKUPS", true)) return;
 
+  const retentionDays = Math.max(1, Number(process.env.BACKUP_RETENTION_DAYS ?? 30) || 30);
+  await pool.query(
+    "UPDATE backups SET status='expired' WHERE status='completed' AND created_at < now() - ($1::int * interval '1 day')",
+    [retentionDays]
+  );
+
   const databases=await query<any>(`
     SELECT d.* FROM database_resources d
     WHERE d.status='running' AND NOT EXISTS (
@@ -366,7 +372,7 @@ app.get("/api/overview", auth, async (_req, res) => {
   const [projects, running, failed, servers, queued, backups] = await Promise.all([
     one<{count:string}>("SELECT count(*)::text count FROM projects"),
     one<{count:string}>("SELECT count(*)::text count FROM deployments WHERE status='RUNNING'"),
-    one<{count:string}>("SELECT count(*)::text count FROM deployments WHERE status LIKE '%FAILED'"),
+    one<{count:string}>("SELECT count(*)::text count FROM deployments WHERE status LIKE '%FAILED' OR status='UNHEALTHY'"),
     one<{count:string}>("SELECT count(*)::text count FROM servers WHERE last_seen_at > now() - interval '45 seconds'"),
     one<{count:string}>("SELECT count(*)::text count FROM deployments WHERE status IN ('QUEUED','CLONING','BUILDING','PUSHING_IMAGE','PROVISIONING','STARTING','HEALTH_CHECKING','MIGRATING','ACTIVATING')"),
     one<{count:string}>("SELECT count(*)::text count FROM backups WHERE status='completed'")
@@ -453,10 +459,40 @@ app.get("/api/projects/:id", auth, async (req, res) => {
 });
 
 app.delete("/api/projects/:id", auth, async (req: AuthedRequest, res) => {
-  const project = await one<any>("DELETE FROM projects WHERE id=$1 RETURNING *", [String(req.params.id)]);
+  const projectId = String(req.params.id);
+  const project = await one<any>("SELECT * FROM projects WHERE id=$1", [projectId]);
   if (!project) return res.status(404).json({ error: "not found" });
-  await audit(req.userId ?? "unknown", "project.delete", "project", project.id, { name: project.name });
-  res.json({ ok: true });
+
+  const services = await query<any>(`
+    SELECT s.id,
+      (SELECT d.server_id FROM deployments d WHERE d.service_id=s.id AND d.server_id IS NOT NULL ORDER BY d.created_at DESC LIMIT 1) server_id
+    FROM services s WHERE s.project_id=$1
+  `, [projectId]);
+  const databases = await query<any>("SELECT * FROM database_resources WHERE project_id=$1", [projectId]);
+  const commands: string[] = [];
+
+  for (const service of services) {
+    if (service.server_id) {
+      commands.push(await enqueueAgentCommand(service.server_id, "STOP", { serviceId:service.id, projectCleanup:true }));
+    }
+  }
+  for (const database of databases) {
+    commands.push(await enqueueAgentCommand(database.server_id, "REMOVE_DATABASE", {
+      databaseId:database.id,
+      dockerName:database.docker_name,
+      volumeName:database.volume_name,
+      deleteData:false,
+      projectCleanup:true
+    }));
+  }
+
+  await pool.query("DELETE FROM projects WHERE id=$1", [projectId]);
+  await audit(req.userId ?? "unknown", "project.delete", "project", projectId, {
+    name: project.name,
+    queuedCleanupCommands: commands.length,
+    dataVolumesRetained: true
+  });
+  res.json({ ok: true, cleanupCommands:commands, note:"Application/database containers are queued for removal. Persistent data volumes are retained." });
 });
 
 app.patch("/api/services/:id", auth, async (req: AuthedRequest, res) => {
@@ -605,6 +641,17 @@ app.get("/api/servers", auth, async (_req, res) => {
   res.json(rows);
 });
 
+app.post("/api/servers/:id/drain", auth, async (req: AuthedRequest, res) => {
+  const draining = Boolean(req.body?.draining);
+  const result = await pool.query(
+    "UPDATE servers SET draining=$2 WHERE id=$1 RETURNING *",
+    [String(req.params.id),draining]
+  );
+  if(!result.rowCount) return res.status(404).json({error:"server not found"});
+  await audit(req.userId ?? "unknown", draining ? "server.drain" : "server.resume", "server", String(req.params.id));
+  res.json(result.rows[0]);
+});
+
 app.get("/api/audit", auth, async (_req, res) => {
   res.json(await query("SELECT * FROM audit_events ORDER BY id DESC LIMIT 300"));
 });
@@ -664,18 +711,18 @@ app.post("/api/projects/:id/databases", auth, async (req: AuthedRequest, res) =>
     server = await one<any>(`
       SELECT sv.id,sv.name FROM deployments d
       JOIN servers sv ON sv.id=d.server_id
-      WHERE d.service_id=$1 AND sv.last_seen_at > now() - interval '45 seconds'
+      WHERE d.service_id=$1 AND sv.draining=false AND sv.last_seen_at > now() - interval '45 seconds'
       ORDER BY d.created_at DESC LIMIT 1
     `, [service.id]);
   }
   if (!server) {
     const preferred = optionalEnv("SERVER_ID");
     if (preferred) {
-      server = await one<any>("SELECT id,name FROM servers WHERE id=$1 AND last_seen_at > now() - interval '45 seconds'", [preferred]);
+      server = await one<any>("SELECT id,name FROM servers WHERE id=$1 AND draining=false AND last_seen_at > now() - interval '45 seconds'", [preferred]);
     }
   }
   if (!server) {
-    server = await one<any>("SELECT id,name FROM servers WHERE last_seen_at > now() - interval '45 seconds' ORDER BY load1 ASC NULLS LAST LIMIT 1");
+    server = await one<any>("SELECT id,name FROM servers WHERE draining=false AND last_seen_at > now() - interval '45 seconds' ORDER BY load1 ASC NULLS LAST LIMIT 1");
   }
   if (!server) return res.status(409).json({ error: "no online runtime server available" });
 
@@ -709,6 +756,18 @@ app.post("/api/projects/:id/databases", auth, async (req: AuthedRequest, res) =>
   });
   await audit(req.userId ?? "unknown","database.create","database",databaseId,{kind:parsed.data.kind,projectId,serviceId:service?.id ?? null});
   res.status(202).json({ databaseId,commandId,variableKey,server:{id:server.id,name:server.name} });
+});
+
+app.delete("/api/databases/:id", auth, async (req: AuthedRequest, res) => {
+  const database = await one<any>("SELECT * FROM database_resources WHERE id=$1", [String(req.params.id)]);
+  if(!database) return res.status(404).json({error:"database not found"});
+  const deleteData = req.body?.confirm === "DELETE_DATA";
+  const commandId = await enqueueAgentCommand(database.server_id,"REMOVE_DATABASE",{
+    databaseId:database.id,dockerName:database.docker_name,volumeName:database.volume_name,deleteData
+  });
+  await pool.query("DELETE FROM database_resources WHERE id=$1",[database.id]);
+  await audit(req.userId ?? "unknown","database.delete","database",database.id,{deleteData});
+  res.status(202).json({commandId,dataDeleted:deleteData,note:deleteData ? "Database container and data volume will be removed." : "Database container will be removed; data volume is retained."});
 });
 
 app.post("/api/databases/:id/backup", auth, async (req: AuthedRequest, res) => {
@@ -902,7 +961,7 @@ app.post("/api/services/:id/logs/refresh", auth, async (req: AuthedRequest, res)
 app.post("/api/platform/self-test", auth, async (req: AuthedRequest, res) => {
   const server = await one<any>(`
     SELECT id,name FROM servers
-    WHERE last_seen_at > now() - interval '45 seconds'
+    WHERE draining=false AND last_seen_at > now() - interval '45 seconds'
     ORDER BY load1 ASC NULLS LAST LIMIT 1
   `);
   if (!server) return res.status(409).json({ error: "no online runtime server available" });
@@ -952,6 +1011,14 @@ app.post("/api/internal/agent/heartbeat", agentAuth, async (req, res) => {
       healthy: z.boolean(),
       statusCode: z.number().int().nullable(),
       latencyMs: z.number().int().nonnegative().nullable(),
+      message: z.string().nullable()
+    })).max(500).default([]),
+    databases: z.array(z.object({
+      databaseId: z.string().min(1),
+      dockerName: z.string(),
+      kind: z.enum(["postgres","redis"]),
+      running: z.boolean(),
+      healthy: z.boolean(),
       message: z.string().nullable()
     })).max(500).default([])
   }).safeParse(req.body);
@@ -1017,6 +1084,10 @@ app.post("/api/internal/agent/heartbeat", agentAuth, async (req, res) => {
       });
 
       if (alert && boolEnv("AUTO_ROLLBACK", false) && service.deploymentId) {
+        await pool.query(
+          "UPDATE deployments SET status='UNHEALTHY',failure_reason=$2 WHERE id=$1 AND status='RUNNING'",
+          [service.deploymentId, service.message ?? "Continuous health monitoring failed"]
+        );
         const activeJob = await one<any>(`
           SELECT id FROM deployments
           WHERE service_id=$1 AND status IN ('QUEUED','CLONING','BUILDING','PUSHING_IMAGE','PROVISIONING','STARTING','HEALTH_CHECKING','MIGRATING','ACTIVATING')
@@ -1044,6 +1115,34 @@ app.post("/api/internal/agent/heartbeat", agentAuth, async (req, res) => {
           }
         }
       }
+    }
+  }
+
+  for (const database of d.databases) {
+    const state = await one<{consecutive_failures:number}>(`
+      UPDATE database_resources SET
+        status=CASE WHEN $2 THEN 'running' ELSE 'unhealthy' END,
+        health_message=$3,
+        consecutive_failures=CASE WHEN $2 THEN 0 ELSE consecutive_failures + 1 END,
+        last_health_at=now(),
+        updated_at=now()
+      WHERE id=$1
+      RETURNING consecutive_failures
+    `, [database.databaseId,database.healthy,database.message]);
+    if(!state) continue;
+    const fingerprint=`database-unhealthy:${database.databaseId}`;
+    if(database.healthy){
+      await resolveAlert(fingerprint);
+    }else if(state.consecutive_failures >= 3){
+      await openAlert({
+        severity:"critical",
+        type:"database_health",
+        fingerprint,
+        title:`Managed database unhealthy: ${database.databaseId}`,
+        message:database.message ?? `${database.kind} health probe failed repeatedly.`,
+        targetType:"database",
+        targetId:database.databaseId
+      });
     }
   }
   res.json({ ok: true });
@@ -1116,6 +1215,17 @@ app.post("/api/internal/agent/commands/:id/complete", agentAuth, async (req, res
       "UPDATE database_resources SET status=$2,updated_at=now() WHERE id=$1",
       [commandPayload.databaseId,status === "completed" ? "running" : "failed"]
     );
+  }
+  if (command.action === "STOP" && commandPayload?.serviceId && status === "completed") {
+    await pool.query(
+      "UPDATE deployments SET status='STOPPED' WHERE service_id=$1 AND status IN ('RUNNING','UNHEALTHY')",
+      [commandPayload.serviceId]
+    );
+    await pool.query(
+      "UPDATE service_health SET healthy=false,message='Stopped by operator',checked_at=now() WHERE service_id=$1",
+      [commandPayload.serviceId]
+    );
+    await resolveAlert(`service-unhealthy:${commandPayload.serviceId}`);
   }
   if (command.action === "FETCH_LOGS" && command.deployment_id && status === "completed") {
     const text = await redactServiceSecrets(commandPayload?.serviceId, String(result.logs ?? "No runtime log output.").slice(-1_000_000));
