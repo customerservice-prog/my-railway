@@ -527,12 +527,13 @@ async function createDeployment(
   imageRef?: string,
   rollbackOf?: string,
   runtimePort?: number | null,
-  detectedBuildType?: string | null
+  detectedBuildType?: string | null,
+  commitSha?: string | null
 ) {
   const deploymentId = id("dep");
   await pool.query(
-    "INSERT INTO deployments(id,service_id,source,image_ref,rollback_of,runtime_port,detected_build_type,status) VALUES($1,$2,$3,$4,$5,$6,$7,'QUEUED')",
-    [deploymentId, serviceId, source, imageRef ?? null, rollbackOf ?? null, runtimePort ?? null, detectedBuildType ?? null]
+    "INSERT INTO deployments(id,service_id,source,image_ref,rollback_of,runtime_port,detected_build_type,commit_sha,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'QUEUED')",
+    [deploymentId, serviceId, source, imageRef ?? null, rollbackOf ?? null, runtimePort ?? null, detectedBuildType ?? null, commitSha ?? null]
   );
   await enqueueDeployment(deploymentId);
   return deploymentId;
@@ -1238,8 +1239,25 @@ app.post("/api/services/:id/maintenance", auth, async (req: AuthedRequest, res) 
 app.post("/api/services/:id/deploy", auth, async (req: AuthedRequest, res) => {
   const service = await one<any>("SELECT * FROM services WHERE id=$1", [String(req.params.id)]);
   if (!service) return res.status(404).json({ error: "service not found" });
-  const deploymentId = await createDeployment(service.id, "manual");
-  await audit(req.userId ?? "unknown", "deployment.create", "deployment", deploymentId, { serviceId: service.id });
+
+  const parsed = z.object({
+    commitSha: z.string().regex(/^[0-9a-f]{40}$/i).optional()
+  }).safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ error: "commitSha must be a full 40-character Git SHA" });
+
+  const deploymentId = await createDeployment(
+    service.id,
+    parsed.data.commitSha ? "manual-commit" : "manual",
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    parsed.data.commitSha ?? null
+  );
+  await audit(req.userId ?? "unknown", "deployment.create", "deployment", deploymentId, {
+    serviceId: service.id,
+    commitSha: parsed.data.commitSha ?? null
+  });
   res.status(202).json({ deploymentId });
 });
 
