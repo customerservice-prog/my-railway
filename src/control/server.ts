@@ -2157,6 +2157,59 @@ app.post("/api/internal/agent/commands/:id/complete", agentAuth, async (req, res
     }
   }
 
+  if (command.action === "REMOVE_VOLUME" && commandPayload?.volumeId) {
+    const volume = await one<any>(
+      "SELECT * FROM volumes WHERE id=$1",
+      [commandPayload.volumeId]
+    );
+
+    if (status === "completed") {
+      if (volume?.service_id) {
+        await pool.query(
+          "UPDATE deployments SET status='STOPPED' WHERE service_id=$1 AND status IN ('RUNNING','UNHEALTHY')",
+          [volume.service_id]
+        );
+        await pool.query(
+          "UPDATE service_health SET healthy=false,message='Stopped for persistent volume detach/removal',checked_at=now() WHERE service_id=$1",
+          [volume.service_id]
+        );
+        await resolveAlert(`service-unhealthy:${volume.service_id}`);
+      }
+
+      if (commandPayload.deleteData) {
+        await pool.query("DELETE FROM volumes WHERE id=$1", [commandPayload.volumeId]);
+      } else {
+        await pool.query(
+          "UPDATE volumes SET status='detached',detached_at=now() WHERE id=$1",
+          [commandPayload.volumeId]
+        );
+      }
+
+      await resolveAlert(`volume-delete:${commandPayload.volumeId}`);
+      await audit(
+        "system",
+        commandPayload.deleteData ? "volume.delete.completed" : "volume.detach.completed",
+        "volume",
+        commandPayload.volumeId,
+        { deleteData:Boolean(commandPayload.deleteData) }
+      );
+    } else {
+      await pool.query(
+        "UPDATE volumes SET status='delete_failed' WHERE id=$1",
+        [commandPayload.volumeId]
+      );
+      await openAlert({
+        severity:"critical",
+        type:"volume_delete",
+        fingerprint:`volume-delete:${commandPayload.volumeId}`,
+        title:"Persistent volume cleanup failed",
+        message:String((publicResult as any).error ?? "The runtime could not detach/remove the persistent volume."),
+        targetType:"volume",
+        targetId:commandPayload.volumeId
+      });
+    }
+  }
+
   if (command.action === "STOP" && commandPayload?.serviceId && status === "completed") {
     await pool.query(
       "UPDATE deployments SET status='STOPPED' WHERE service_id=$1 AND status IN ('RUNNING','UNHEALTHY')",
