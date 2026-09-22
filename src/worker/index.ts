@@ -109,10 +109,15 @@ async function buildImage(dep: Deployment): Promise<{image:string;runtimePort:nu
     await log(dep.id, `Build type: ${prepared.detected}; runtime port: ${runtimePort}`);
 
     const shortSha = (dep.commit_sha ?? dep.id).slice(0, 12).replace(/[^a-zA-Z0-9_.-]/g,"");
+    const releaseId = dep.id.replace(/^dep_/,"").slice(-10).replace(/[^a-zA-Z0-9_.-]/g,"");
+    const releaseTag = `${shortSha}-${releaseId}`;
     const localMode = registry === "local";
+    // A commit SHA is not enough to identify a built release: build settings, root directory,
+    // Dockerfile, environment-independent build args, etc. can change while source SHA stays the same.
+    // Every deployment therefore receives a unique tag so rollback can never be silently retargeted.
     const image = localMode
-      ? `myrailway/${dep.project_slug}-${dep.service_id.slice(-6)}:${shortSha}`
-      : `${registry}/${dep.project_slug}-${dep.service_id.slice(-6)}:${shortSha}`;
+      ? `myrailway/${dep.project_slug}-${dep.service_id.slice(-6)}:${releaseTag}`
+      : `${registry}/${dep.project_slug}-${dep.service_id.slice(-6)}:${releaseTag}`;
 
     await status(dep.id, "BUILDING");
     await run("docker", [
