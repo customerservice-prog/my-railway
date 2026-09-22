@@ -1038,7 +1038,7 @@ async function openProject(id, requestedServiceId = null) {
     } catch (error) { alert(error.message); }
   };
 
-  $("[data-backup-volume]", dialog).forEach((button) => button.onclick = async () => {
+  $$("[data-backup-volume]", dialog).forEach((button) => button.onclick = async () => {
     try {
       const queued = await api(`/api/volumes/${button.dataset.backupVolume}/backup`, { method: "POST" });
       await pollCommand(queued.commandId, 30 * 60_000);
@@ -1047,7 +1047,7 @@ async function openProject(id, requestedServiceId = null) {
     } catch (error) { alert(error.message); }
   });
 
-  $("[data-reattach-volume]", dialog).forEach((button) => button.onclick = async () => {
+  $$("[data-reattach-volume]", dialog).forEach((button) => button.onclick = async () => {
     try {
       const result = await api(`/api/volumes/${button.dataset.reattachVolume}/reattach`, { method:"POST" });
       alert(result.note || "Volume reattached. Redeploy the service.");
@@ -1055,7 +1055,7 @@ async function openProject(id, requestedServiceId = null) {
     } catch (error) { alert(error.message); }
   });
 
-  $("[data-delete-volume]", dialog).forEach((button) => button.onclick = async () => {
+  $$("[data-delete-volume]", dialog).forEach((button) => button.onclick = async () => {
     const volume = (service.volumes || []).find((item) => item.id === button.dataset.deleteVolume);
     if (!volume) return;
 
