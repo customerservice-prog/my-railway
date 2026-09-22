@@ -7,6 +7,7 @@ import dns from "node:dns/promises";
 import path from "node:path";
 import { authenticator } from "otplib";
 import { z } from "zod";
+import { CronExpressionParser } from "cron-parser";
 import { pool, one, query, ensureSchema } from "../shared/db.js";
 import { encryptSecret, decryptSecret } from "../shared/crypto.js";
 import { env, optionalEnv, boolEnv } from "../shared/env.js";
@@ -120,6 +121,24 @@ async function enqueueAgentCommand(serverId: string, action: string, payload: un
     [commandId,serverId,deploymentId ?? null,action,encryptSecret(JSON.stringify(payload))]
   );
   return commandId;
+}
+
+function nextCronAt(expression: string, timezone: string, from: Date, hashSeed?: string): Date {
+  const interval = CronExpressionParser.parse(expression, {
+    currentDate: from,
+    tz: timezone || "UTC",
+    hashSeed
+  });
+  return interval.next().toDate();
+}
+
+function validateCron(expression: string, timezone: string, hashSeed?: string): string | null {
+  try {
+    nextCronAt(expression, timezone, new Date(), hashSeed);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 
 async function redactServiceSecrets(serviceId: string | undefined, value: string) {
