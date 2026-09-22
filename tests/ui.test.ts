@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const app = fs.readFileSync("public/app.js", "utf8");
+const lines = app.split(/\r?\n/);
 
 test("data-action button groups use querySelectorAll helper", () => {
   const actionGroups = [
@@ -25,13 +26,14 @@ test("data-action button groups use querySelectorAll helper", () => {
   ];
 
   for (const name of actionGroups) {
-    if (!app.includes(`[${name}]`)) continue;
-    const singleSelector = new RegExp(`(?<!\\$)\\$\\(\\\"\\[${name}\\]\\\"`);
-    assert.equal(
-      singleSelector.test(app),
-      false,
-      `${name} should use $$() when wiring a button group`
-    );
+    const handlers = lines.filter((line) => line.includes(`[${name}]`) && line.includes(".forEach"));
+    for (const line of handlers) {
+      assert.match(
+        line.trim(),
+        /^\$\$\(/,
+        `${name} group handler must begin with $$(), got: ${line.trim()}`
+      );
+    }
   }
 });
 
