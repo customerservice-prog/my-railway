@@ -37,8 +37,63 @@ const loginAttempts = new Map<string,{count:number;resetAt:number}>();
 type AuthedRequest = Request & { userId?: string };
 
 function safeUser(user: Record<string, unknown>) {
-  const { password_hash: _p, totp_secret_enc: _t, ...rest } = user;
-  return rest;
+  const { password_hash: _p, totp_secret_enc: _t, recovery_codes: recoveryCodes, ...rest } = user;
+  return {
+    ...rest,
+    recovery_code_count: Array.isArray(recoveryCodes) ? recoveryCodes.length : 0
+  };
+}
+
+function recoveryCodeHash(code: string) {
+  return crypto.createHash("sha256").update(code.trim().toUpperCase()).digest("hex");
+}
+
+function generateRecoveryCodes() {
+  const codes = Array.from({ length: 10 }, () =>
+    crypto.randomBytes(10).toString("hex").match(/.{1,5}/g)!.join("-").toUpperCase()
+  );
+  return { codes, hashes: codes.map(recoveryCodeHash) };
+}
+
+async function consumeRecoveryCode(userId: string, code: string): Promise<boolean> {
+  const hash = recoveryCodeHash(code);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      "SELECT recovery_codes FROM users WHERE id=$1 FOR UPDATE",
+      [userId]
+    );
+    const stored = Array.isArray(result.rows[0]?.recovery_codes) ? result.rows[0].recovery_codes as string[] : [];
+    if (!stored.includes(hash)) {
+      await client.query("ROLLBACK");
+      return false;
+    }
+    const remaining = stored.filter((item) => item !== hash);
+    await client.query("UPDATE users SET recovery_codes=$2 WHERE id=$1", [userId, JSON.stringify(remaining)]);
+    await client.query("COMMIT");
+    return true;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function sameOriginMutation(req: Request): boolean {
+  if (["GET","HEAD","OPTIONS"].includes(req.method.toUpperCase())) return true;
+
+  const fetchSite = req.header("sec-fetch-site");
+  if (fetchSite && !["same-origin","none"].includes(fetchSite)) return false;
+
+  const origin = req.header("origin");
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === req.get("host");
+  } catch {
+    return false;
+  }
 }
 
 function signSession(userId: string) {
@@ -51,6 +106,9 @@ function auth(req: AuthedRequest, res: Response, next: NextFunction) {
   try {
     const payload = jwt.verify(token, sessionSecret, { issuer: "my-railway" }) as jwt.JwtPayload;
     req.userId = String(payload.sub);
+    if (!sameOriginMutation(req)) {
+      return res.status(403).json({ error: "cross-site state-changing request rejected" });
+    }
     return next();
   } catch {
     return res.status(401).json({ error: "invalid session" });
@@ -464,7 +522,8 @@ app.post("/api/auth/login", async (req, res) => {
   const parsed = z.object({
     email: z.string().email(),
     password: z.string(),
-    totp: z.string().optional()
+    totp: z.string().optional(),
+    recoveryCode: z.string().optional()
   }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid credentials" });
   const user = await one<any>("SELECT * FROM users WHERE email=$1", [parsed.data.email.toLowerCase()]);
@@ -476,10 +535,16 @@ app.post("/api/auth/login", async (req, res) => {
     });
     return res.status(401).json({ error: "invalid credentials" });
   }
+  let usedRecoveryCode = false;
   if (user.totp_enabled) {
-    if (!parsed.data.totp || !user.totp_secret_enc) return res.status(401).json({ error: "totp required", totpRequired: true });
-    const secret = decryptSecret(user.totp_secret_enc);
-    if (!authenticator.check(parsed.data.totp, secret)) return res.status(401).json({ error: "invalid totp", totpRequired: true });
+    const secret = user.totp_secret_enc ? decryptSecret(user.totp_secret_enc) : null;
+    const validTotp = Boolean(parsed.data.totp && secret && authenticator.check(parsed.data.totp, secret));
+    if (!validTotp && parsed.data.recoveryCode) {
+      usedRecoveryCode = await consumeRecoveryCode(user.id, parsed.data.recoveryCode);
+    }
+    if (!validTotp && !usedRecoveryCode) {
+      return res.status(401).json({ error: "authenticator or recovery code required", totpRequired: true });
+    }
   }
   loginAttempts.delete(loginKey);
   await pool.query("UPDATE users SET last_login_at=now() WHERE id=$1", [user.id]);
@@ -490,8 +555,8 @@ app.post("/api/auth/login", async (req, res) => {
     maxAge: 12 * 60 * 60 * 1000,
     path: "/"
   });
-  await audit(user.email, "auth.login", "user", user.id);
-  res.json({ user: safeUser(user) });
+  await audit(user.email, usedRecoveryCode ? "auth.login.recovery_code" : "auth.login", "user", user.id);
+  res.json({ user: safeUser(user), usedRecoveryCode });
 });
 
 app.post("/api/auth/logout", auth, async (req: AuthedRequest, res) => {
@@ -519,9 +584,38 @@ app.post("/api/auth/totp/confirm", auth, async (req: AuthedRequest, res) => {
   if (!user?.totp_secret_enc) return res.status(400).json({ error: "enroll first" });
   const secret = decryptSecret(user.totp_secret_enc);
   if (!authenticator.check(token, secret)) return res.status(400).json({ error: "invalid token" });
-  await pool.query("UPDATE users SET totp_enabled=true WHERE id=$1", [user.id]);
-  await audit(user.email, "auth.totp.enabled", "user", user.id);
-  res.json({ ok: true });
+  const recovery = generateRecoveryCodes();
+  await pool.query(
+    "UPDATE users SET totp_enabled=true,recovery_codes=$2 WHERE id=$1",
+    [user.id, JSON.stringify(recovery.hashes)]
+  );
+  await audit(user.email, "auth.totp.enabled", "user", user.id, { recoveryCodesGenerated: recovery.codes.length });
+  res.json({ ok: true, recoveryCodes: recovery.codes });
+});
+
+app.post("/api/auth/recovery-codes/regenerate", auth, async (req: AuthedRequest, res) => {
+  const parsed = z.object({
+    password: z.string().min(1),
+    totp: z.string().min(6).max(12)
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "password and authenticator code are required" });
+
+  const user = await one<any>("SELECT * FROM users WHERE id=$1", [req.userId]);
+  if (!user || !(await bcrypt.compare(parsed.data.password, user.password_hash))) {
+    return res.status(401).json({ error: "invalid password" });
+  }
+  if (!user.totp_enabled || !user.totp_secret_enc) {
+    return res.status(409).json({ error: "two-factor authentication is not enabled" });
+  }
+  const secret = decryptSecret(user.totp_secret_enc);
+  if (!authenticator.check(parsed.data.totp, secret)) {
+    return res.status(401).json({ error: "invalid authenticator code" });
+  }
+
+  const recovery = generateRecoveryCodes();
+  await pool.query("UPDATE users SET recovery_codes=$2 WHERE id=$1", [user.id, JSON.stringify(recovery.hashes)]);
+  await audit(user.email, "auth.recovery_codes.regenerated", "user", user.id, { recoveryCodesGenerated: recovery.codes.length });
+  res.json({ recoveryCodes: recovery.codes });
 });
 
 app.get("/api/overview", auth, async (_req, res) => {
