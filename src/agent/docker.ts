@@ -202,7 +202,7 @@ export async function provisionDatabase(payload: DatabasePayload) {
   await docker(["volume","create",payload.volumeName]);
   await docker(["rm","-f",payload.dockerName]).catch(()=>{});
 
-  const environment = payload.kind === "postgres"
+  const environment: Record<string,string> = payload.kind === "postgres"
     ? {
         POSTGRES_USER: payload.username ?? "myrailway",
         POSTGRES_PASSWORD: payload.password,
