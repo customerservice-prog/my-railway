@@ -839,7 +839,7 @@ async function openProject(id, requestedServiceId = null) {
   dialog.showModal();
   $("#close-detail").onclick = () => dialog.close();
 
-  $("[data-switch-service]", dialog).forEach((button) => button.onclick = () => {
+  $$("[data-switch-service]", dialog).forEach((button) => button.onclick = () => {
     openProject(id, button.dataset.switchService);
   });
 
