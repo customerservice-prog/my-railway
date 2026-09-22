@@ -59,7 +59,6 @@ get_env() {
   grep -E "^$key=" .env | tail -n1 | cut -d= -f2- || true
 }
 
-configured_acme_email="$(get_env ACME_EMAIL)"
 configured_platform_host="$(get_env PLATFORM_HOST)"
 
 if [ -n "$configured_platform_host" ]; then
