@@ -97,7 +97,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data/routes:/var/lib/myrailway/routes
-      - ./data/backups:/var/lib/myrailway/backups
+      - backup-data:/var/lib/myrailway/backups
     networks: [myrailway]
 
   maintenance:
@@ -122,7 +122,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     volumes:
-      - ./data/backups:/backups
+      - backup-data:/backups
     networks: [myrailway]
 
 networks:
@@ -133,3 +133,5 @@ volumes:
   postgres-data:
   redis-data:
   registry-data:
+  backup-data:
+    name: myrailway-backups
