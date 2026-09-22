@@ -631,10 +631,12 @@ async function renderSecurity() {
 async function renderPlatform() {
   let info;
   let status;
+  let readiness;
   try {
-    [info, status] = await Promise.all([
+    [info, status, readiness] = await Promise.all([
       api("/api/platform/update/info"),
-      api("/api/platform/update/status")
+      api("/api/platform/update/status"),
+      api("/api/platform/readiness")
     ]);
   } catch (error) {
     $("#content").innerHTML = `
@@ -654,13 +656,30 @@ async function renderPlatform() {
   const running = status.status === "running";
   const updateAvailable = Boolean(info.updateAvailable);
 
+  const readinessRows = (readiness.checks || []).map((check) => `
+    <div class="readiness-row">
+      <div>
+        <strong>${esc(check.title)}</strong>
+        <div class="muted">${esc(check.message)}</div>
+      </div>
+      <span class="pill ${check.status === "pass" ? "good" : check.status === "blocker" ? "bad" : "warn"}">
+        ${esc(check.status)}
+      </span>
+    </div>
+  `).join("");
+
   $("#content").innerHTML = `
     <div class="cards">
+      <div class="metric"><div class="label">Launch readiness</div><div class="value"><span class="pill ${readiness.ready ? "good" : "bad"}">${readiness.ready ? "READY" : "NOT READY"}</span></div></div>
+      <div class="metric"><div class="label">Blockers</div><div class="value">${esc(readiness.blockers)}</div></div>
+      <div class="metric"><div class="label">Warnings</div><div class="value">${esc(readiness.warnings)}</div></div>
+      <div class="metric"><div class="label">Checks passed</div><div class="value">${esc(readiness.passed)}</div></div>
       <div class="metric"><div class="label">Current platform</div><div class="value mono">${esc(current)}</div></div>
       <div class="metric"><div class="label">Release channel</div><div class="value mono">${esc(info.ref || status.ref || "—")}</div></div>
-      <div class="metric"><div class="label">Available release</div><div class="value mono">${esc(target)}</div></div>
-      <div class="metric"><div class="label">Update state</div><div class="value"><span class="pill ${statusClass(status.status)}">${esc(status.status || "idle")}</span></div></div>
     </div>
+
+    <div class="section-head"><h3>Launch readiness</h3><span class="muted">Private-production gate</span></div>
+    <div class="panel readiness-list">${readinessRows || '<div class="empty">No readiness checks returned.</div>'}</div>
 
     <div class="section-head"><h3>Self deployment</h3></div>
     <div class="panel">
