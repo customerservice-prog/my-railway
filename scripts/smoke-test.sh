@@ -187,6 +187,34 @@ node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/command
 PROJECT_ID="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/project.json","utf8")).id)')"
 SERVICE_ID="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/project.json","utf8")).serviceId)')"
 
+checkpoint "service settings binding"
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/service-update.json -w '%{http_code}' -X PATCH -H 'content-type: application/json' -d '{"memoryMb":768,"healthPath":"/"}' "http://127.0.0.1:8080/api/services/$SERVICE_ID")"
+expect_status "$STATUS" "200" "update service settings" /tmp/service-update.json
+curl -fsS -b /tmp/cookies.txt "http://127.0.0.1:8080/api/projects/$PROJECT_ID" > /tmp/project-detail.json
+node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/project-detail.json","utf8")).services[0];if(Number(x.memory_mb)!==768)process.exit(1)'
+
+checkpoint "maintenance mode"
+docker rm -f mr-smoke-app >/dev/null 2>&1 || true
+docker run -d   --name mr-smoke-app   --network myrailway   --restart unless-stopped   --label "myrailway.service=$SERVICE_ID"   --label "myrailway.deployment=dep-smoke-maint"   --label "myrailway.kind=web"   --label "myrailway.port=3000"   --label "myrailway.healthPath=/"   my-railway:local   node -e 'require("http").createServer((q,r)=>{r.end("ok")}).listen(3000,"0.0.0.0")' >/dev/null
+
+docker compose exec -T postgres psql -U myrailway -d myrailway -v ON_ERROR_STOP=1 -c   "INSERT INTO deployments(id,service_id,source,status,server_id,created_at,completed_at) VALUES('dep-smoke-maint','$SERVICE_ID','smoke','RUNNING','local-runtime-01',now(),now()) ON CONFLICT (id) DO UPDATE SET status='RUNNING',server_id='local-runtime-01';" >/dev/null
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/maintenance-enable.json -w '%{http_code}' -H 'content-type: application/json' -d '{"enabled":true,"message":"Smoke maintenance"}' "http://127.0.0.1:8080/api/services/$SERVICE_ID/maintenance")"
+expect_status "$STATUS" "202" "enable maintenance" /tmp/maintenance-enable.json
+MAINT_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/maintenance-enable.json","utf8")).commandId)')"
+wait_command "$MAINT_COMMAND" "enable maintenance"
+MAINT_CONTAINER="$(docker ps --filter "label=myrailway.maintenance.service=$SERVICE_ID" --format '{{.Names}}' | head -1)"
+test -n "$MAINT_CONTAINER"
+STATUS="$(docker run --rm --network myrailway curlimages/curl:8.10.1 -sS -o /tmp/maint-body.txt -w '%{http_code}' "http://$MAINT_CONTAINER:3000/")"
+expect_status "$STATUS" "503" "maintenance responder status" /tmp/maint-body.txt
+grep -q 'Smoke maintenance' /tmp/maint-body.txt
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/maintenance-disable.json -w '%{http_code}' -H 'content-type: application/json' -d '{"enabled":false}' "http://127.0.0.1:8080/api/services/$SERVICE_ID/maintenance")"
+expect_status "$STATUS" "202" "disable maintenance" /tmp/maintenance-disable.json
+MAINT_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/maintenance-disable.json","utf8")).commandId)')"
+wait_command "$MAINT_COMMAND" "disable maintenance"
+test -z "$(docker ps -q --filter "label=myrailway.maintenance.service=$SERVICE_ID")"
+
 checkpoint "managed Redis provision"
 node -e 'require("fs").writeFileSync("/tmp/database-create.json",JSON.stringify({kind:"redis",name:"Smoke Redis",serviceId:process.argv[1],variableKey:"SMOKE_REDIS_URL"}))' "$SERVICE_ID"
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/database-create-response.json -w '%{http_code}' -H 'content-type: application/json' --data-binary @/tmp/database-create.json "http://127.0.0.1:8080/api/projects/$PROJECT_ID/databases")"
