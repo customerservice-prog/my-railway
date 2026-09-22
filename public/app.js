@@ -111,7 +111,8 @@ $("#bootstrap-form").addEventListener("submit", async (event) => {
       method: "POST",
       body: JSON.stringify({
         email: $("#bootstrap-email").value,
-        password: $("#bootstrap-password").value
+        password: $("#bootstrap-password").value,
+        setupToken: $("#bootstrap-token").value
       })
     });
     $("#login-email").value = $("#bootstrap-email").value;
@@ -799,7 +800,7 @@ async function openProject(id) {
   $("#close-detail").onclick = () => dialog.close();
 
   $("#delete-project").onclick = async () => {
-    if (!confirm("Delete this project from My Railway? Running containers/databases will be queued for removal, but persistent data volumes are retained.")) return;
+    if (!confirm("Delete this project from My Railway? This is allowed only after all managed databases and persistent-volume attachments have been removed.")) return;
     try {
       const result = await api(`/api/projects/${project.id}`, { method:"DELETE" });
       dialog.close();
