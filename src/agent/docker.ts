@@ -32,6 +32,72 @@ async function serviceContainers(serviceId: string): Promise<string[]> {
   return out ? out.split("\n").filter(Boolean) : [];
 }
 
+function maintenanceContainerName(serviceId: string): string {
+  return `mr-maint-${serviceId.toLowerCase().replace(/[^a-z0-9_.-]+/g,"-").slice(-80)}`;
+}
+
+async function waitMaintenanceReady(containerName: string): Promise<void> {
+  let last="";
+  for(let i=0;i<20;i++){
+    try{
+      const code=await docker([
+        "run","--rm","--network",network,
+        "curlimages/curl:8.10.1",
+        "--silent","--output","/dev/null","--write-out","%{http_code}",
+        "--max-time","3",
+        `http://${containerName}:3000/`
+      ],15_000);
+      if(code.trim()==="503") return;
+      last=`HTTP ${code}`;
+    }catch(error){
+      last=error instanceof Error ? error.message : String(error);
+    }
+    await sleep(500);
+  }
+  throw new Error(`Maintenance responder failed readiness: ${last.slice(-500)}`);
+}
+
+export async function setServiceMaintenance(
+  serviceId: string,
+  enabled: boolean,
+  message: string,
+  domains: string[]
+) {
+  const name=maintenanceContainerName(serviceId);
+
+  if(!enabled){
+    await docker(["rm","-f",name]).catch(()=>{});
+    return refreshServiceRoute(serviceId,domains);
+  }
+
+  await docker(["rm","-f",name]).catch(()=>{});
+  const responderScript=[
+    "const http=require('http');",
+    "const escape=(s)=>String(s).replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\\"':'&quot;',\"'\":'&#39;'}[c]));",
+    "const msg=escape(process.env.MAINTENANCE_MESSAGE||'We are performing scheduled maintenance. Please try again shortly.');",
+    "const html='<!doctype html><html><head><meta charset=\\"utf-8\\"><meta name=\\"viewport\\" content=\\"width=device-width,initial-scale=1\\"><title>Maintenance</title><style>body{margin:0;background:#0a0b0d;color:#f5f7fb;font:16px system-ui;display:grid;place-items:center;min-height:100vh}.card{max-width:640px;padding:40px;border:1px solid #2b2f37;border-radius:16px;background:#111318;text-align:center}h1{margin-top:0;font-size:32px}p{color:#b5bdc9;line-height:1.6}</style></head><body><main class=\\"card\\"><h1>Maintenance</h1><p>'+msg+'</p></main></body></html>';",
+    "http.createServer((req,res)=>{res.writeHead(503,{'content-type':'text/html; charset=utf-8','cache-control':'no-store','retry-after':'300'});res.end(html)}).listen(3000,'0.0.0.0');"
+  ].join("");
+
+  await docker([
+    "run","-d",
+    "--name",name,
+    "--network",network,
+    "--restart","unless-stopped",
+    "--cpus","0.25",
+    "--memory","128m",
+    "--pids-limit","64",
+    "--label",`myrailway.maintenance.service=${serviceId}`,
+    "-e",`MAINTENANCE_MESSAGE=${message}`,
+    "my-railway:local",
+    "node","-e",responderScript
+  ]);
+
+  await waitMaintenanceReady(name);
+  await activateRoute(serviceId,name,3000,domains);
+  return { enabled:true,containerName:name,domains };
+}
+
 async function waitHealthy(containerName: string, port: number, healthPath: string): Promise<void> {
   const retries = intEnv("DEPLOY_HEALTH_RETRIES", 24);
   const interval = intEnv("DEPLOY_HEALTH_INTERVAL_MS", 2500);
@@ -221,6 +287,7 @@ export async function stopService(serviceId: string) {
   await removeRoute(serviceId);
   const names = await serviceContainers(serviceId);
   for (const name of names) await docker(["rm","-f",name]).catch(()=>{});
+  await docker(["rm","-f",maintenanceContainerName(serviceId)]).catch(()=>{});
   return { stopped: names };
 }
 
