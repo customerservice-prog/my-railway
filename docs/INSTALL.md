@@ -23,14 +23,17 @@ Recommended starting point for several modest applications:
 On a fresh host:
 
 ```bash
-git clone https://github.com/customerservice-prog/my-railway.git
+git clone --branch release/private-v1-rc1 https://github.com/customerservice-prog/my-railway.git
 cd my-railway
 
 sudo ./scripts/install-host.sh \
+  --branch release/private-v1-rc1 \
   --domain cloud.example.com \
   --public-ip 203.0.113.10 \
   --email you@example.com
 ```
+
+For production testing, the release branch above is preferred over a moving `main`. Use `main` only when you intentionally want the newest development changes.
 
 The installer:
 
