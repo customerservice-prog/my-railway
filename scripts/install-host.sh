@@ -191,11 +191,13 @@ DNS required:
 
 Next:
   1. Point the DNS record above at this server.
-  2. Open the dashboard and create the first administrator.
-  3. Enable TOTP in Security.
-  4. Configure the GitHub App and webhook.
-  5. Configure an offsite restic repository.
-  6. Run the dashboard platform self-test.
+  2. Retrieve the setup token:
+       sudo grep '^ADMIN_BOOTSTRAP_TOKEN=' $INSTALL_DIR/.env
+  3. Open the dashboard and create the first administrator using that token.
+  4. Enable TOTP in Security.
+  5. Configure the GitHub App and webhook.
+  6. Configure an offsite restic repository.
+  7. Run the dashboard platform self-test.
 
 Install directory:
   $INSTALL_DIR
