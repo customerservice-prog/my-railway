@@ -520,10 +520,36 @@ export async function restoreDatabase(payload: DatabasePayload & {fileName:strin
       "-v",`${payload.volumeName}:/data`,
       "-v",`${backupVolumeName}:/backup:ro`,
       "alpine:3.20","sh","-lc",
-      `cp /backup/${safe} /data/dump.rdb && chmod 644 /data/dump.rdb`
+      [
+        "rm -rf /data/appendonlydir",
+        "rm -f /data/appendonly.aof /data/appendonly.aof.*",
+        `cp /backup/${safe} /data/dump.rdb`,
+        "chmod 644 /data/dump.rdb"
+      ].join(" && ")
     ],5*60_000);
-  } finally {
     await docker(["start",payload.dockerName],2*60_000);
+
+    let ready=false;
+    let lastError="";
+    for(let i=0;i<40;i++){
+      try{
+        const pong=await docker([
+          "exec",payload.dockerName,"sh","-lc",
+          'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli ping 2>/dev/null'
+        ],30_000);
+        if(pong.includes("PONG")){
+          ready=true;
+          break;
+        }
+      }catch(error){
+        lastError=error instanceof Error ? error.message : String(error);
+      }
+      await sleep(500);
+    }
+    if(!ready) throw new Error(`Redis did not become healthy after restore: ${lastError}`);
+  } catch (error) {
+    await docker(["start",payload.dockerName],2*60_000).catch(()=>{});
+    throw error;
   }
   return {restored:safe};
 }
