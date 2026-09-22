@@ -2,6 +2,7 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/customerservice-prog/my-railway.git"
+INSTALL_BRANCH="main"
 INSTALL_DIR="/opt/my-railway"
 PLATFORM_HOST=""
 PUBLIC_IP=""
@@ -18,6 +19,7 @@ Options:
   --public-ip IP       Public IPv4 address application domains should point to.
   --email EMAIL        ACME/Let's Encrypt contact email.
   --repo URL           Git repository to install from.
+  --branch NAME        Git branch/ref to install (default main).
   --dir PATH           Installation directory (default /opt/my-railway).
   --configure-firewall Configure UFW for OpenSSH, 80/tcp, and 443/tcp.
   -h, --help           Show this help.
@@ -30,6 +32,7 @@ while [ "$#" -gt 0 ]; do
     --public-ip) PUBLIC_IP="${2:-}"; shift 2 ;;
     --email) ACME_EMAIL="${2:-}"; shift 2 ;;
     --repo) REPO_URL="${2:-}"; shift 2 ;;
+    --branch) INSTALL_BRANCH="${2:-}"; shift 2 ;;
     --dir) INSTALL_DIR="${2:-}"; shift 2 ;;
     --configure-firewall) CONFIGURE_FIREWALL=true; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -94,16 +97,16 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 
 if [ -e "$INSTALL_DIR/.git" ]; then
-  git -C "$INSTALL_DIR" fetch origin main
-  git -C "$INSTALL_DIR" checkout main
-  git -C "$INSTALL_DIR" pull --ff-only origin main
+  git -C "$INSTALL_DIR" fetch origin "$INSTALL_BRANCH"
+  git -C "$INSTALL_DIR" checkout "$INSTALL_BRANCH"
+  git -C "$INSTALL_DIR" pull --ff-only origin "$INSTALL_BRANCH"
 else
   if [ -e "$INSTALL_DIR" ] && [ "$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)" -gt 0 ]; then
     echo "Install directory exists and is not empty: $INSTALL_DIR" >&2
     exit 1
   fi
   mkdir -p "$(dirname "$INSTALL_DIR")"
-  git clone --branch main "$REPO_URL" "$INSTALL_DIR"
+  git clone --branch "$INSTALL_BRANCH" "$REPO_URL" "$INSTALL_DIR"
 fi
 
 cd "$INSTALL_DIR"
