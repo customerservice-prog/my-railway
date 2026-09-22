@@ -108,8 +108,12 @@ services:
     image: my-railway:local
     restart: unless-stopped
     command: ["/bin/sh","-lc","sleep 300; while true; do /app/scripts/maintenance.sh || true; sleep 21600; done"]
+    env_file: .env
+    environment:
+      BACKUP_DIR: /var/lib/myrailway/backups
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - backup-data:/var/lib/myrailway/backups
     networks: [myrailway]
 
   platform-backup:
