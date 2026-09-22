@@ -2,3 +2,8 @@
 .narrow{max-width:760px}.mt12{margin-top:12px}.mt16{margin-top:16px}.no-top{margin-top:0}.max320{max-width:320px}.max180{max-width:180px}.align-end{align-self:end}.break-anywhere{overflow-wrap:anywhere}
 
 .p22{padding:22px}
+
+.readiness-list{display:grid}
+.readiness-row{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:14px 16px;border-bottom:1px solid var(--line)}
+.readiness-row:last-child{border-bottom:0}
+.readiness-row strong{display:block;margin-bottom:3px}
