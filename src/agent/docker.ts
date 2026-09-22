@@ -483,10 +483,11 @@ export async function runtimeDatabaseHealth(): Promise<DatabaseHealth[]> {
   return results;
 }
 
-export async function removeDatabase(dockerName: string, volumeName?: string, deleteData=false) {
+export async function removeDatabase(dockerName: string, volumeName?: string, deleteData=false, serviceId?: string) {
+  if (serviceId) await stopService(serviceId);
   await docker(["rm","-f",dockerName]).catch(()=>{});
   if (deleteData && volumeName) await docker(["volume","rm","-f",volumeName]).catch(()=>{});
-  return {dockerName,removed:true,dataDeleted:Boolean(deleteData && volumeName)};
+  return {dockerName,removed:true,dataDeleted:Boolean(deleteData && volumeName),serviceStopped:Boolean(serviceId)};
 }
 
 export type RuntimeHealth = {
