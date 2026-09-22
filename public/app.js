@@ -661,8 +661,19 @@ async function openProject(id, requestedServiceId = null) {
 
   const volumes = (service.volumes || []).map((volume) => `
     <div class="kv">
-      <span><strong>${esc(volume.name)}</strong><br><span class="mono muted">${esc(volume.mount_path)}</span></span>
-      <span><button data-backup-volume="${esc(volume.id)}">Backup now</button> <span class="mono muted">${esc(volume.docker_volume_name)}</span></span>
+      <span>
+        <strong>${esc(volume.name)}</strong>
+        <br><span class="mono muted">${esc(volume.mount_path)}</span>
+        <br><span class="pill ${statusClass(volume.status)}">${esc(volume.status || "attached")}</span>
+      </span>
+      <span>
+        <button data-backup-volume="${esc(volume.id)}">Backup now</button>
+        ${["detached","delete_failed"].includes(volume.status)
+          ? `<button data-reattach-volume="${esc(volume.id)}">Reattach</button>`
+          : ""}
+        <button data-delete-volume="${esc(volume.id)}">${volume.status === "detached" ? "Delete data" : "Remove"}</button>
+        <span class="mono muted">${esc(volume.docker_volume_name)}</span>
+      </span>
     </div>
   `).join("") || '<div class="muted">No persistent volumes attached.</div>';
 
@@ -1027,11 +1038,43 @@ async function openProject(id, requestedServiceId = null) {
     } catch (error) { alert(error.message); }
   };
 
-  $$("[data-backup-volume]", dialog).forEach((button) => button.onclick = async () => {
+  $("[data-backup-volume]", dialog).forEach((button) => button.onclick = async () => {
     try {
       const queued = await api(`/api/volumes/${button.dataset.backupVolume}/backup`, { method: "POST" });
       await pollCommand(queued.commandId, 30 * 60_000);
       alert("Volume backup completed.");
+      openProject(id, service.id);
+    } catch (error) { alert(error.message); }
+  });
+
+  $("[data-reattach-volume]", dialog).forEach((button) => button.onclick = async () => {
+    try {
+      const result = await api(`/api/volumes/${button.dataset.reattachVolume}/reattach`, { method:"POST" });
+      alert(result.note || "Volume reattached. Redeploy the service.");
+      openProject(id, service.id);
+    } catch (error) { alert(error.message); }
+  });
+
+  $("[data-delete-volume]", dialog).forEach((button) => button.onclick = async () => {
+    const volume = (service.volumes || []).find((item) => item.id === button.dataset.deleteVolume);
+    if (!volume) return;
+
+    let deleteData = false;
+    if (volume.status === "detached") {
+      deleteData = confirm("Permanently delete this detached Docker volume and all of its data?");
+      if (!deleteData) return;
+    } else {
+      deleteData = confirm("Remove this volume?\n\nOK permanently deletes the Docker volume/data.\nCancel lets you keep the data detached.");
+      if (!deleteData && !confirm("Detach the volume and retain its data? The service will be stopped; reattach then redeploy to use it again.")) return;
+    }
+
+    try {
+      const result = await api(`/api/volumes/${button.dataset.deleteVolume}`, {
+        method:"DELETE",
+        body:JSON.stringify({confirm:deleteData ? "DELETE_DATA" : "KEEP_DATA"})
+      });
+      if (result.commandId) await pollCommand(result.commandId, 10 * 60_000);
+      alert(result.note || (deleteData ? "Volume deleted." : "Volume detached."));
       openProject(id, service.id);
     } catch (error) { alert(error.message); }
   });
