@@ -29,6 +29,11 @@ if [ -z "$current_agent" ] || [[ "$current_agent" == replace-* ]]; then replace_
 current_pg="$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2- || true)"
 if [ -z "$current_pg" ]; then replace_env POSTGRES_PASSWORD "$(openssl rand -hex 24)"; fi
 
+current_bootstrap="$(grep '^ADMIN_BOOTSTRAP_TOKEN=' .env | cut -d= -f2- || true)"
+if [ -z "$current_bootstrap" ] || [[ "$current_bootstrap" == replace-* ]]; then
+  replace_env ADMIN_BOOTSTRAP_TOKEN "$(openssl rand -hex 32)"
+fi
+
 mkdir -p data/routes data/backups
 touch data/acme.json
 chmod 600 data/acme.json
