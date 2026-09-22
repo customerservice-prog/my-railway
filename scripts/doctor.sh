@@ -30,6 +30,7 @@ ENC_KEY="$(get_env SECRET_ENCRYPTION_KEY)"
 AGENT_TOKEN="$(get_env AGENT_TOKEN)"
 PG_PASS="$(get_env POSTGRES_PASSWORD)"
 WEBHOOK_SECRET="$(get_env GITHUB_WEBHOOK_SECRET)"
+BOOTSTRAP_TOKEN="$(get_env ADMIN_BOOTSTRAP_TOKEN)"
 PLATFORM_HOST="$(get_env PLATFORM_HOST)"
 PUBLIC_IP="$(get_env PUBLIC_IP)"
 COOKIE_SECURE="$(get_env COOKIE_SECURE)"
@@ -56,6 +57,9 @@ fi
 
 [ "${#WEBHOOK_SECRET}" -ge 32 ] && [ "$WEBHOOK_SECRET" != "replace-me" ] \
   && pass "GITHUB_WEBHOOK_SECRET is populated" || fail "GITHUB_WEBHOOK_SECRET is missing/placeholder/too short"
+
+[ "${#BOOTSTRAP_TOKEN}" -ge 32 ] && [[ "$BOOTSTRAP_TOKEN" != replace-* ]] \
+  && pass "ADMIN_BOOTSTRAP_TOKEN is populated" || fail "ADMIN_BOOTSTRAP_TOKEN is missing/placeholder/too short"
 
 if [ -n "$PLATFORM_HOST" ]; then
   pass "PLATFORM_HOST is configured: $PLATFORM_HOST"
