@@ -14,17 +14,23 @@ test("data-action button groups use querySelectorAll helper", () => {
     "data-delete-db",
     "data-verify-domain",
     "data-delete-domain",
+    "data-backup-volume",
     "data-project-db-backup",
     "data-project-db-delete",
     "data-cron-log",
-    "data-test-backup"
+    "data-test-backup",
+    "data-restore-db",
+    "data-restore-volume",
+    "data-resolve-alert"
   ];
+
   for (const name of actionGroups) {
     if (!app.includes(`[${name}]`)) continue;
+    const singleSelector = new RegExp(`(?<!\\$)\\$\\(\\\"\\[${name}\\]\\\"`);
     assert.equal(
-      app.includes(`$(\"[${name}]\"`).toString(),
-      "false",
-      `${name} should not use the single-element selector when wiring a button group`
+      singleSelector.test(app),
+      false,
+      `${name} should use $$() when wiring a button group`
     );
   }
 });
