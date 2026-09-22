@@ -107,14 +107,34 @@ curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 \
   && pass "Control plane health endpoint is OK" || warn "Control plane is not currently healthy on localhost:8080"
 
 if [ -n "$RESTIC_REPOSITORY" ]; then
-  if command -v restic >/dev/null 2>&1; then
-    [ -n "$RESTIC_PASSWORD" ] && pass "Restic offsite backup configuration is present" \
-      || fail "RESTIC_REPOSITORY is set but RESTIC_PASSWORD is blank"
+  if [ -z "$RESTIC_PASSWORD" ]; then
+    fail "RESTIC_REPOSITORY is set but RESTIC_PASSWORD is blank"
+  elif docker image inspect my-railway:local >/dev/null 2>&1; then
+    if docker run --rm my-railway:local restic version >/dev/null 2>&1; then
+      pass "Restic is available inside the My Railway backup image"
+    else
+      fail "My Railway image does not provide a working restic binary"
+    fi
   else
-    fail "RESTIC_REPOSITORY is set but restic is unavailable"
+    warn "Cannot verify restic yet because my-railway:local has not been built"
   fi
 else
   warn "No offsite restic repository is configured"
+fi
+
+if docker volume inspect myrailway-backups >/dev/null 2>&1; then
+  LATEST_BACKUP="$(docker run --rm -v myrailway-backups:/backups:ro alpine:3.20 sh -lc "find /backups/platform -type f -name 'control-*.sql.gz' -printf '%T@\n' 2>/dev/null | sort -nr | head -1" || true)"
+  if [ -n "$LATEST_BACKUP" ]; then
+    NOW="$(date +%s)"
+    AGE_HOURS="$(( (NOW - ${LATEST_BACKUP%.*}) / 3600 ))"
+    if [ "$AGE_HOURS" -le 48 ]; then
+      pass "Latest control-plane backup is $AGE_HOURS hour(s) old"
+    else
+      warn "Latest control-plane backup is $AGE_HOURS hour(s) old"
+    fi
+  else
+    warn "No control-plane backup file was found in myrailway-backups"
+  fi
 fi
 
 echo
