@@ -1,6 +1,6 @@
 import { env } from "../shared/env.js";
 import { sleep } from "../shared/util.js";
-import { backupVolume, deploy, restartService, restoreVolume, runtimeStats, stopService, type DeployPayload } from "./docker.js";
+import { backupVolume, deploy, restartService, restoreVolume, runtimeStats, stopService, testVolumeBackup, type DeployPayload } from "./docker.js";
 
 const control = env("CONTROL_PLANE_URL", "http://localhost:8080").replace(/\/$/,"");
 const token = env("AGENT_TOKEN");
@@ -52,7 +52,8 @@ async function execute(command: any) {
     case "STOP": return stopService(String(command.payload.serviceId));
     case "RESTART": return restartService(String(command.payload.serviceId));
     case "BACKUP_VOLUME": return backupVolume(String(command.payload.volumeName), String(command.payload.backupName));
-    case "RESTORE_VOLUME": return restoreVolume(String(command.payload.volumeName), String(command.payload.fileName));
+    case "TEST_VOLUME_BACKUP": return testVolumeBackup(String(command.payload.fileName));
+    case "RESTORE_VOLUME": return restoreVolume(String(command.payload.volumeName), String(command.payload.fileName), command.payload.serviceId ? String(command.payload.serviceId) : undefined);
     default: throw new Error(`unknown command: ${command.action}`);
   }
 }
