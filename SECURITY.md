@@ -69,3 +69,10 @@ Production defaults are intentionally bounded:
 - unused labeled release images: `IMAGE_RETENTION_HOURS`
 
 My Railway release images are labeled at build time so cleanup targets only platform-managed images.
+
+
+## Database command credential handling
+
+Managed Redis credentials are not passed through `redis-cli -a <password>` command-line arguments. Runtime health, backup, and restore operations use the container's `REDISCLI_AUTH` environment instead.
+
+Managed PostgreSQL operations run inside the database container using its own environment and local client tools, avoiding cross-version backup clients and unnecessary credential exposure in external process arguments.
