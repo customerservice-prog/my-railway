@@ -247,6 +247,62 @@ export async function runtimeServiceHealth(): Promise<RuntimeHealth[]> {
   return results.filter((item)=>item.serviceId !== "unknown");
 }
 
+export async function runtimeLogs(serviceId: string) {
+  const names = await serviceContainers(serviceId);
+  if (!names.length) return { containerName:null, logs:"No managed container is currently present." };
+  const name = names[0]!;
+  const { stdout, stderr } = await exec("docker", ["logs","--tail","300","--timestamps",name], {
+    timeout: 30_000,
+    maxBuffer: 2 * 1024 * 1024
+  });
+  return { containerName:name, logs:(stdout + stderr).slice(-1_000_000) };
+}
+
+export async function platformSelfTest() {
+  const checks: Array<{name:string;ok:boolean;detail:string}> = [];
+  const check = async (name:string, fn:()=>Promise<string|void>) => {
+    try {
+      const detail = await fn();
+      checks.push({name,ok:true,detail:String(detail ?? "ok")});
+    } catch (error) {
+      checks.push({name,ok:false,detail:error instanceof Error ? error.message : String(error)});
+    }
+  };
+
+  await check("docker", async()=>docker(["version","--format","{{.Server.Version}}"]));
+  await check("private-network", async()=>{ await docker(["network","inspect",network]); return network; });
+  await check("route-storage", async()=>{
+    await fs.mkdir(env("TRAEFIK_ROUTES_DIR", "/var/lib/myrailway/routes"), {recursive:true});
+    const target=path.join(env("TRAEFIK_ROUTES_DIR", "/var/lib/myrailway/routes"), ".self-test");
+    await fs.writeFile(target,"ok",{mode:0o600});
+    await fs.rm(target,{force:true});
+    return "writable";
+  });
+  await check("backup-storage", async()=>{
+    await fs.mkdir(backupDir,{recursive:true});
+    const target=path.join(backupDir,".self-test");
+    await fs.writeFile(target,"ok",{mode:0o600});
+    await fs.rm(target,{force:true});
+    return "writable";
+  });
+  await check("ephemeral-container", async()=>{
+    await docker(["pull","alpine:3.20"], 5 * 60_000);
+    return docker(["run","--rm","--network",network,"alpine:3.20","sh","-lc","printf my-railway-ok"]);
+  });
+  const scratch=`mr-self-test-${Date.now()}`;
+  await check("volume-lifecycle", async()=>{
+    await docker(["volume","create",scratch]);
+    try {
+      await docker(["run","--rm","-v",`${scratch}:/data`,"alpine:3.20","sh","-lc","echo ok >/data/test && test -s /data/test"]);
+      return "create/write/read";
+    } finally {
+      await docker(["volume","rm","-f",scratch]).catch(()=>{});
+    }
+  });
+
+  return { ok:checks.every((item)=>item.ok), checkedAt:new Date().toISOString(), checks };
+}
+
 export async function runtimeStats() {
   const cpuCount = os.cpus().length;
   const memoryTotalMb = Math.round(os.totalmem()/1024/1024);
