@@ -33,6 +33,28 @@ find "$DIR" -type f -name 'control-*.sql.gz' -mtime "+$RETENTION" -delete
 find "$DIR" -type f -name 'control-*.sql.gz.sha256' -mtime "+$RETENTION" -delete
 find "$BACKUP_ROOT" -maxdepth 1 -type f \( -name 'bak_*.tar.gz' -o -name 'bak_*.dump' -o -name 'bak_*.rdb' \) -mtime "+$RETENTION" -delete
 
+BACKUP_ID="bak_platform_${STAMP//[^a-zA-Z0-9]/}"
+BACKUP_SIZE="$(stat -c '%s' "$OUT")"
+BACKUP_LOCATION="/var/lib/myrailway/backups/platform/$(basename "$OUT")"
+
+record_backup() {
+  local sql
+  sql="INSERT INTO backups(id,service_id,server_id,kind,location,status,size_bytes,created_at,completed_at)
+       VALUES('$BACKUP_ID',NULL,NULL,'platform','$BACKUP_LOCATION','completed',$BACKUP_SIZE,now(),now())
+       ON CONFLICT(id) DO UPDATE SET location=excluded.location,status='completed',size_bytes=excluded.size_bytes,completed_at=now();"
+
+  if [ -n "${DB_CONTAINER:-}" ]; then
+    docker exec -e "PGPASSWORD=$PGPASSWORD" "$DB_CONTAINER" \
+      psql -U "$USER" -d "$DB" -v ON_ERROR_STOP=1 -c "$sql" >/dev/null 2>&1
+  else
+    PGPASSWORD="$PGPASSWORD" psql -h "$HOST" -U "$USER" -d "$DB" -v ON_ERROR_STOP=1 -c "$sql" >/dev/null 2>&1
+  fi
+}
+
+if ! record_backup; then
+  echo "Warning: backup file was created, but its metadata could not be recorded yet (the control-plane schema may still be initializing)." >&2
+fi
+
 echo "Platform backup created: $OUT"
 
 if [ -n "${RESTIC_REPOSITORY:-}" ]; then
