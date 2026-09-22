@@ -1,6 +1,6 @@
 import { env } from "../shared/env.js";
 import { sleep } from "../shared/util.js";
-import { backupDatabase, backupVolume, deploy, platformSelfTest, provisionDatabase, refreshServiceRoute, removeDatabase, restartService, restoreDatabase, restoreVolume, runCronJob, runtimeDatabaseHealth, runtimeLogs, runtimeServiceHealth, runtimeStats, stopService, testDatabaseBackup, testVolumeBackup, type CronRunPayload, type DatabasePayload, type DeployPayload } from "./docker.js";
+import { backupDatabase, backupVolume, deploy, platformSelfTest, provisionDatabase, refreshServiceRoute, removeDatabase, restartService, restoreDatabase, restoreVolume, runCronJob, runtimeDatabaseHealth, runtimeLogs, runtimeServiceHealth, runtimeStats, setServiceMaintenance, stopService, testDatabaseBackup, testVolumeBackup, type CronRunPayload, type DatabasePayload, type DeployPayload } from "./docker.js";
 
 const control = env("CONTROL_PLANE_URL", "http://localhost:8080").replace(/\/$/,"");
 const token = env("AGENT_TOKEN");
@@ -57,6 +57,12 @@ async function execute(command: any) {
     case "FETCH_LOGS": return runtimeLogs(String(command.payload.serviceId));
     case "SELF_TEST": return platformSelfTest();
     case "REFRESH_ROUTE": return refreshServiceRoute(String(command.payload.serviceId), Array.isArray(command.payload.domains) ? command.payload.domains.map(String) : []);
+    case "MAINTENANCE": return setServiceMaintenance(
+      String(command.payload.serviceId),
+      Boolean(command.payload.enabled),
+      String(command.payload.message ?? "We are performing scheduled maintenance. Please try again shortly."),
+      Array.isArray(command.payload.domains) ? command.payload.domains.map(String) : []
+    );
     case "RUN_CRON": return runCronJob(command.payload as CronRunPayload);
     case "PROVISION_DATABASE": return provisionDatabase(command.payload as DatabasePayload);
     case "BACKUP_DATABASE": return backupDatabase(command.payload);
