@@ -1005,7 +1005,11 @@ app.patch("/api/services/:id", auth, async (req: AuthedRequest, res) => {
     sets.push(`${mapping[key]}=$${values.length}`);
   }
   values.push(String(req.params.id));
-  const result = await pool.query(`UPDATE services SET ${sets.join(",")}, updated_at=now() WHERE id=${values.length} RETURNING *`, values);
+  const idPlaceholder = `${values.length}`;
+  const result = await pool.query(
+    `UPDATE services SET ${sets.join(",")}, updated_at=now() WHERE id=${idPlaceholder} RETURNING *`,
+    values
+  );
   if (!result.rowCount) return res.status(404).json({ error: "not found" });
 
   const updatedService = result.rows[0];
