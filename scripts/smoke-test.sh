@@ -72,7 +72,7 @@ PLATFORM_NETWORK=myrailway
 HOST_PROJECT_DIR=$(pwd)
 PLATFORM_UPDATER_URL=http://updater:8090
 PLATFORM_UPDATER_TOKEN=$(openssl rand -hex 32)
-PLATFORM_UPDATE_REF=main
+PLATFORM_UPDATE_REF=$(git rev-parse HEAD)
 TRAEFIK_ROUTES_DIR=/var/lib/myrailway/routes
 BACKUP_DIR=/var/lib/myrailway/backups
 BACKUP_VOLUME_NAME=myrailway-backups
@@ -135,7 +135,7 @@ grep -q 'Smoke App' /tmp/projects.json
 # The independent updater must be reachable only through authenticated control-plane proxying.
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/platform-update-info.json -w '%{http_code}'   http://127.0.0.1:8080/api/platform/update/info)"
 test "$STATUS" = "200"
-grep -q '"ref":"main"' /tmp/platform-update-info.json
+grep -q '"updateAvailable":false' /tmp/platform-update-info.json
 
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/platform-update-status.json -w '%{http_code}'   http://127.0.0.1:8080/api/platform/update/status)"
 test "$STATUS" = "200"
