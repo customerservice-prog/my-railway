@@ -370,7 +370,10 @@ async function renderDatabases() {
       <td><strong>${esc(database.name)}</strong><div class="mono muted">${esc(database.id)}</div></td>
       <td>${esc(database.project_name)}</td>
       <td><span class="pill">${esc(database.kind)}</span></td>
-      <td><span class="pill ${statusClass(database.status)}">${esc(database.status)}</span></td>
+      <td>
+        <span class="pill ${statusClass(database.status)}">${esc(database.status)}</span>
+        <div class="muted">${database.health_message ? esc(database.health_message) : (database.last_health_at ? "Last health check " + fmt(database.last_health_at) : "No health check yet")}</div>
+      </td>
       <td class="mono">${esc(database.docker_name)}</td>
       <td class="mono">${esc(database.variable_key)}</td>
       <td>
@@ -612,10 +615,24 @@ async function openProject(id) {
       <button class="icon-btn" id="close-detail">×</button>
     </div>
 
+    <div class="section-head"><h3>Runtime health</h3></div>
+    <div class="kv">
+      <span class="muted">Health</span>
+      <span>
+        ${service.kind === "cron"
+          ? '<span class="pill">scheduled</span>'
+          : service.health
+            ? `<span class="pill ${service.health.healthy ? "good" : "bad"}">${service.health.healthy ? "healthy" : "unhealthy"}</span> ${esc(service.health.message || "")}`
+            : '<span class="pill warn">no health data</span>'}
+      </span>
+    </div>
+    <div class="kv"><span class="muted">Last checked</span><span>${service.kind === "cron" ? fmt(service.next_cron_at) : fmt(service.health?.checked_at)}</span></div>
+
     <div class="section-head"><h3>Service controls</h3></div>
     <div class="row">
       <button class="primary" id="deploy-now">${service.kind === "cron" ? "Publish cron release" : "Deploy now"}</button>
       ${service.kind === "cron" ? "" : '<button id="restart-service">Restart</button><button id="refresh-runtime-logs">Refresh live logs</button><button id="stop-service" class="danger">Stop</button>'}
+      <button id="delete-project" class="danger">Delete project</button>
     </div>
 
     <div class="section-head"><h3>Build & runtime</h3></div>
@@ -685,6 +702,17 @@ async function openProject(id) {
 
   dialog.showModal();
   $("#close-detail").onclick = () => dialog.close();
+
+  $("#delete-project").onclick = async () => {
+    if (!confirm("Delete this project from My Railway? Running containers/databases will be queued for removal, but persistent data volumes are retained.")) return;
+    try {
+      const result = await api(`/api/projects/${project.id}`, { method:"DELETE" });
+      dialog.close();
+      alert(result.note || "Project deleted.");
+      state.view="projects";
+      await renderProjects();
+    } catch (error) { alert(error.message); }
+  };
 
   $("#deploy-now").onclick = async () => {
     try {
