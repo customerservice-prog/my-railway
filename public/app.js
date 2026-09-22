@@ -188,6 +188,7 @@ async function render() {
     backups: "Backups",
     alerts: "Alerts",
     security: "Security",
+    platform: "Platform",
     audit: "Audit log"
   };
   $("#view-title").textContent = titles[state.view] || "My Railway";
@@ -208,6 +209,7 @@ async function render() {
     if (state.view === "backups") return renderBackups();
     if (state.view === "alerts") return renderAlerts();
     if (state.view === "security") return renderSecurity();
+    if (state.view === "platform") return renderPlatform();
     if (state.view === "audit") return renderAudit();
   } catch (error) {
     if (error.unauthorized) return boot();
@@ -624,6 +626,107 @@ async function renderSecurity() {
       } catch (error) { alert(error.message); }
     };
   };
+}
+
+async function renderPlatform() {
+  let info;
+  let status;
+  try {
+    [info, status] = await Promise.all([
+      api("/api/platform/update/info"),
+      api("/api/platform/update/status")
+    ]);
+  } catch (error) {
+    $("#content").innerHTML = `
+      <div class="panel narrow">
+        <div class="p22">
+          <div class="section-head no-top"><h3>Platform updater unavailable</h3></div>
+          <p class="error">${esc(error.message)}</p>
+          <p class="muted">The updater is an independent internal service. Check the updater container and PLATFORM_UPDATER_TOKEN configuration.</p>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  const current = info.currentSha ? String(info.currentSha).slice(0,12) : "unknown";
+  const target = info.targetSha ? String(info.targetSha).slice(0,12) : "unavailable";
+  const running = status.status === "running";
+  const updateAvailable = Boolean(info.updateAvailable);
+
+  $("#content").innerHTML = `
+    <div class="cards">
+      <div class="metric"><div class="label">Current platform</div><div class="value mono">${esc(current)}</div></div>
+      <div class="metric"><div class="label">Release channel</div><div class="value mono">${esc(info.ref || status.ref || "—")}</div></div>
+      <div class="metric"><div class="label">Available release</div><div class="value mono">${esc(target)}</div></div>
+      <div class="metric"><div class="label">Update state</div><div class="value"><span class="pill ${statusClass(status.status)}">${esc(status.status || "idle")}</span></div></div>
+    </div>
+
+    <div class="section-head"><h3>Self deployment</h3></div>
+    <div class="panel">
+      <div class="p22">
+        <p>My Railway updates itself through a separate updater supervisor. The updater survives while the control plane is replaced, builds the candidate image, verifies a candidate control plane, switches traffic, recreates platform services, and restores the previous image/code if the final health check fails.</p>
+        ${info.remoteError ? `<p class="error">${esc(info.remoteError)}</p>` : ""}
+        <div class="row mt16">
+          <button id="platform-update-now" class="primary" ${(!updateAvailable || running) ? "disabled" : ""}>
+            ${running ? "Update running…" : updateAvailable ? "Deploy platform update" : "Platform is up to date"}
+          </button>
+          <button id="platform-update-refresh">Check again</button>
+        </div>
+        <p class="muted">Update channel: ${esc(info.ref || "—")}. Only commits published to this configured release branch can be installed from the dashboard.</p>
+      </div>
+    </div>
+
+    <div class="section-head"><h3>Update log</h3></div>
+    <div class="log" id="platform-update-log">${esc(status.log || "No platform update has run yet.")}</div>
+  `;
+
+  $("#platform-update-refresh").onclick = () => renderPlatform();
+
+  if ($("#platform-update-now") && updateAvailable && !running) {
+    $("#platform-update-now").onclick = async () => {
+      if (!confirm(`Deploy My Railway platform release ${target}? The updater will health-check the new control plane and roll code/images back automatically if activation fails.`)) return;
+      try {
+        await api("/api/platform/update", { method:"POST", body:"{}" });
+        await monitorPlatformUpdate();
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+  }
+}
+
+async function monitorPlatformUpdate(timeoutMs = 15 * 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+
+  while (Date.now() < deadline) {
+    try {
+      const status = await api("/api/platform/update/status");
+      lastError = null;
+      const log = $("#platform-update-log");
+      if (log) {
+        log.textContent = status.log || `Platform update state: ${status.status}`;
+        log.scrollTop = log.scrollHeight;
+      }
+
+      if (["completed","up_to_date"].includes(status.status)) {
+        await new Promise((resolve)=>setTimeout(resolve,2500));
+        await renderPlatform();
+        return;
+      }
+      if (status.status === "failed") {
+        await renderPlatform();
+        throw new Error(status.error || "Platform self-update failed");
+      }
+    } catch (error) {
+      // A brief disconnect is expected while the final control-plane container is replaced.
+      lastError = error;
+    }
+    await new Promise((resolve)=>setTimeout(resolve,2000));
+  }
+
+  throw lastError || new Error("Timed out waiting for platform update");
 }
 
 async function renderAudit() {
