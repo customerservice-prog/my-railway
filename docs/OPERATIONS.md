@@ -465,3 +465,42 @@ After upgrade:
 - run arbitrary untrusted customer source builds
 - use `docker system prune --volumes` on production
 - disable backups because disk is full without replacing them with offsite retention
+
+
+## Cron job failure
+
+Cron releases are published like application releases, but scheduled executions are one-off containers.
+
+If a cron run fails:
+
+1. open the project and inspect Recent cron runs;
+2. inspect exit code and redacted logs;
+3. verify the published deployment is still RUNNING;
+4. verify required secrets/volumes still exist;
+5. use Run now after fixing the problem.
+
+A timeout returns exit code 124.
+
+If the runtime is offline or draining when a run becomes due, the run is marked failed and an alert is created instead of silently disappearing.
+
+## Drain a runtime server
+
+Dashboard -> Servers -> Drain.
+
+Drain mode prevents new scheduling to that runtime. Existing containers keep running.
+
+Before host maintenance:
+
+1. Drain.
+2. Confirm no deployment/build/database placement is being started on the host.
+3. Perform maintenance.
+4. Run platform self-test.
+5. Resume scheduling.
+
+## Removing domains
+
+Removing a domain from the project screen immediately queues a live route refresh on the current runtime. If no running application container exists, the service route is removed.
+
+## Cancelling deployments
+
+Cancellation is intentionally limited to the QUEUED state. Once deployment work has started, use normal failure/rollback/stop controls rather than pretending an in-flight build or runtime transition was atomically cancelled.
