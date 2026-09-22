@@ -30,6 +30,7 @@ jobs:
       - run: cp .env.example .env && docker compose config --quiet
       - run: docker build -t my-railway:local .
       - run: docker build -f Dockerfile.updater -t my-railway-updater:local .
+      - run: bash scripts/certificate-status-integration-test.sh
       - run: bash scripts/smoke-test.sh
       - run: bash scripts/self-update-integration-test.sh
       - run: bash scripts/settings-rollback-integration-test.sh
