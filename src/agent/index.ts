@@ -1,6 +1,6 @@
 import { env } from "../shared/env.js";
 import { sleep } from "../shared/util.js";
-import { backupVolume, deploy, restartService, restoreVolume, runtimeStats, stopService, testVolumeBackup, type DeployPayload } from "./docker.js";
+import { backupVolume, deploy, restartService, restoreVolume, runtimeServiceHealth, runtimeStats, stopService, testVolumeBackup, type DeployPayload } from "./docker.js";
 
 const control = env("CONTROL_PLANE_URL", "http://localhost:8080").replace(/\/$/,"");
 const token = env("AGENT_TOKEN");
@@ -20,10 +20,10 @@ async function request(path: string, init: RequestInit = {}) {
 }
 
 async function heartbeat() {
-  const stats = await runtimeStats();
+  const [stats, services] = await Promise.all([runtimeStats(), runtimeServiceHealth()]);
   const response = await request("/api/internal/agent/heartbeat", {
     method:"POST",
-    body:JSON.stringify({ id:serverId, name:serverName, agentVersion, ...stats })
+    body:JSON.stringify({ id:serverId, name:serverName, agentVersion, ...stats, services })
   });
   if (!response.ok) throw new Error(`heartbeat failed: ${response.status}`);
 }
