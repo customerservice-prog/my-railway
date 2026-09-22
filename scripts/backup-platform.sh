@@ -12,4 +12,4 @@ sha256sum "$OUT" > "$OUT.sha256"
 find "$DIR" -type f -name 'control-*.sql.gz' -mtime +30 -delete
 find "$DIR" -type f -name 'control-*.sql.gz.sha256' -mtime +30 -delete
 echo "Platform backup created: $OUT"
-if [ -n "${RESTIC_REPOSITORY:-}" ] && command -v restic >/dev/null 2>&1; then restic backup "$OUT" "$OUT.sha256"; fi
+if [ -n "${RESTIC_REPOSITORY:-}" ] && command -v restic >/dev/null 2>&1; then restic backup "$DIR"; fi
