@@ -69,7 +69,9 @@ export type DeployPayload = {
 };
 
 export async function deploy(payload: DeployPayload) {
-  await docker(["pull", payload.image], 10 * 60_000);
+  if (!payload.image.startsWith("myrailway/")) {
+    await docker(["pull", payload.image], 10 * 60_000);
+  }
   const envData = await envFile(payload.environment ?? {});
   try {
     if (payload.predeployCommand) {
@@ -150,7 +152,26 @@ export async function backupVolume(volumeName: string, backupName: string) {
   return { location: path.join(backupDir,file), sizeBytes: stat.size };
 }
 
-export async function restoreVolume(volumeName: string, fileName: string) {
+export async function testVolumeBackup(fileName: string) {
+  const safe = path.basename(fileName);
+  const scratch = `mr-restore-test-${Date.now()}`;
+  await docker(["volume","create",scratch]);
+  try {
+    await docker([
+      "run","--rm",
+      "-v",`${scratch}:/target`,
+      "-v",`${backupDir}:/backup:ro`,
+      "alpine:3.20","sh","-lc",
+      `tar tzf /backup/${safe} >/dev/null && tar xzf /backup/${safe} -C /target`
+    ], 30 * 60_000);
+    return { tested: safe, scratchVolume: scratch };
+  } finally {
+    await docker(["volume","rm","-f",scratch]).catch(()=>{});
+  }
+}
+
+export async function restoreVolume(volumeName: string, fileName: string, serviceId?: string) {
+  if (serviceId) await stopService(serviceId);
   const safe = path.basename(fileName);
   await docker([
     "run","--rm",
