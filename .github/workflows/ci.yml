@@ -18,7 +18,12 @@ jobs:
       - run: npm run build
       - run: node --check public/app.js
       - run: npm test
-      - run: bash -n scripts/*.sh
+      - name: Syntax-check every shell script
+        run: |
+          for script in scripts/*.sh; do
+            echo "Checking $script"
+            bash -n "$script"
+          done
       - run: bash scripts/install-host.sh --help
       - run: bash scripts/export-recovery.sh --help
       - run: cp .env.example .env && docker compose config --quiet
