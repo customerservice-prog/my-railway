@@ -964,6 +964,14 @@ app.delete("/api/services/:id", auth, async (req: AuthedRequest, res) => {
   const service = await one<any>("SELECT * FROM services WHERE id=$1", [serviceId]);
   if (!service) return res.status(404).json({ error: "service not found" });
 
+  const siblingCount = await one<{count:string}>(
+    "SELECT count(*)::text count FROM services WHERE project_id=$1",
+    [service.project_id]
+  );
+  if (Number(siblingCount?.count ?? 0) <= 1) {
+    return res.status(409).json({ error:"cannot delete the last service; delete the project instead" });
+  }
+
   const [databaseCount, volumeCount] = await Promise.all([
     one<{count:string}>("SELECT count(*)::text count FROM database_resources WHERE service_id=$1", [serviceId]),
     one<{count:string}>("SELECT count(*)::text count FROM volumes WHERE service_id=$1", [serviceId])
