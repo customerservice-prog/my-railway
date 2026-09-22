@@ -101,6 +101,9 @@ p.chmod(0o600)
 PY
 
 set +e
+PLATFORM_SETTINGS_HEALTH_RETRIES=8 \
+PLATFORM_SETTINGS_RESTORE_RETRIES=20 \
+PLATFORM_SETTINGS_HEALTH_INTERVAL_SECONDS=1 \
 bash scripts/platform-apply-settings.sh ci-rollback-test
 APPLY_EXIT="$?"
 set -e
