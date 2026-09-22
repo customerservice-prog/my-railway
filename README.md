@@ -101,6 +101,29 @@ A fresh Linux server with:
 
 For initial private use, 4 CPU cores, 8 GB RAM, and SSD storage is a reasonable minimum. Size the machine for the actual workloads you move onto it.
 
+## Fresh-host automation
+
+For a new Ubuntu/Debian server, see [docs/INSTALL.md](docs/INSTALL.md).
+
+The production installer can install Docker, generate platform secrets, configure the dashboard hostname, create a systemd boot unit, start the stack, and run the doctor preflight:
+
+```bash
+sudo ./scripts/install-host.sh \
+  --domain cloud.example.com \
+  --public-ip 203.0.113.10 \
+  --email you@example.com
+```
+
+Firewall changes require the explicit `--configure-firewall` option.
+
+Useful host tools:
+
+```bash
+./scripts/doctor.sh
+./scripts/export-recovery.sh --full
+./scripts/upgrade.sh
+```
+
 ## First installation
 
 ```bash
@@ -178,7 +201,7 @@ ADMIN_BOOTSTRAP_PASSWORD=replace-this-with-a-long-random-password
 
 Start the platform. It creates `admin@localhost` only if the users table is empty. Remove the environment value afterward.
 
-After logging in, open **Security** and enable authenticator-based 2FA.
+After logging in, open **Security** and enable authenticator-based 2FA. Save the generated one-time recovery codes outside this server. The Security page also supports password rotation, recovery-code regeneration, and revoking older administrator sessions.
 
 ## Connect GitHub securely
 
