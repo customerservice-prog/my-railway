@@ -590,11 +590,25 @@ app.get("/healthz", async (_req, res) => {
 app.post("/api/auth/bootstrap", async (req, res) => {
   const count = await one<{count:string}>("SELECT count(*)::text AS count FROM users");
   if (Number(count?.count ?? "0") > 0) return res.status(409).json({ error: "platform already initialized" });
+
+  const requiredToken = optionalEnv("ADMIN_BOOTSTRAP_TOKEN");
+  if (!requiredToken) {
+    return res.status(503).json({ error: "ADMIN_BOOTSTRAP_TOKEN is not configured" });
+  }
+
   const parsed = z.object({
     email: z.string().email().default("admin@localhost"),
-    password: z.string().min(12)
+    password: z.string().min(12),
+    setupToken: z.string().min(1)
   }).safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  if (!parsed.success) return res.status(400).json({ error: "email, password, and setup token are required" });
+
+  const supplied = Buffer.from(parsed.data.setupToken);
+  const expected = Buffer.from(requiredToken);
+  if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) {
+    return res.status(401).json({ error: "invalid setup token" });
+  }
+
   const userId = id("usr");
   const hash = await bcrypt.hash(parsed.data.password, 12);
   await pool.query("INSERT INTO users(id,email,password_hash) VALUES($1,$2,$3)", [userId, parsed.data.email.toLowerCase(), hash]);
@@ -900,12 +914,29 @@ app.delete("/api/projects/:id", auth, async (req: AuthedRequest, res) => {
   const project = await one<any>("SELECT * FROM projects WHERE id=$1", [projectId]);
   if (!project) return res.status(404).json({ error: "not found" });
 
+  const [databaseCount, volumeCount] = await Promise.all([
+    one<{count:string}>("SELECT count(*)::text count FROM database_resources WHERE project_id=$1", [projectId]),
+    one<{count:string}>(`
+      SELECT count(*)::text count
+      FROM volumes v JOIN services s ON s.id=v.service_id
+      WHERE s.project_id=$1
+    `, [projectId])
+  ]);
+  const databases = Number(databaseCount?.count ?? 0);
+  const volumes = Number(volumeCount?.count ?? 0);
+  if (databases > 0 || volumes > 0) {
+    return res.status(409).json({
+      error: "project contains stateful resources; detach/delete managed databases and detach persistent volumes before deleting the project",
+      databases,
+      volumes
+    });
+  }
+
   const services = await query<any>(`
     SELECT s.id,
       (SELECT d.server_id FROM deployments d WHERE d.service_id=s.id AND d.server_id IS NOT NULL ORDER BY d.created_at DESC LIMIT 1) server_id
     FROM services s WHERE s.project_id=$1
   `, [projectId]);
-  const databases = await query<any>("SELECT * FROM database_resources WHERE project_id=$1", [projectId]);
   const commands: string[] = [];
 
   for (const service of services) {
@@ -913,23 +944,14 @@ app.delete("/api/projects/:id", auth, async (req: AuthedRequest, res) => {
       commands.push(await enqueueAgentCommand(service.server_id, "STOP", { serviceId:service.id, projectCleanup:true }));
     }
   }
-  for (const database of databases) {
-    commands.push(await enqueueAgentCommand(database.server_id, "REMOVE_DATABASE", {
-      databaseId:database.id,
-      dockerName:database.docker_name,
-      volumeName:database.volume_name,
-      deleteData:false,
-      projectCleanup:true
-    }));
-  }
 
   await pool.query("DELETE FROM projects WHERE id=$1", [projectId]);
   await audit(req.userId ?? "unknown", "project.delete", "project", projectId, {
     name: project.name,
     queuedCleanupCommands: commands.length,
-    dataVolumesRetained: true
+    statefulResourceCounts: { databases, volumes }
   });
-  res.json({ ok: true, cleanupCommands:commands, note:"Application/database containers are queued for removal. Persistent data volumes are retained." });
+  res.json({ ok: true, cleanupCommands:commands, note:"Stateless project deleted; managed service containers are queued for removal." });
 });
 
 app.patch("/api/services/:id", auth, async (req: AuthedRequest, res) => {
