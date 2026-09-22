@@ -62,7 +62,12 @@ async function execute(command: any) {
     case "BACKUP_DATABASE": return backupDatabase(command.payload);
     case "TEST_DATABASE_BACKUP": return testDatabaseBackup(command.payload);
     case "RESTORE_DATABASE": return restoreDatabase(command.payload);
-    case "REMOVE_DATABASE": return removeDatabase(String(command.payload.dockerName), command.payload.volumeName ? String(command.payload.volumeName) : undefined, Boolean(command.payload.deleteData));
+    case "REMOVE_DATABASE": return removeDatabase(
+      String(command.payload.dockerName),
+      command.payload.volumeName ? String(command.payload.volumeName) : undefined,
+      Boolean(command.payload.deleteData),
+      command.payload.serviceId ? String(command.payload.serviceId) : undefined
+    );
     default: throw new Error(`unknown command: ${command.action}`);
   }
 }
