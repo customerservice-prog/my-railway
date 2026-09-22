@@ -70,7 +70,11 @@
         <label>Build type<select name="buildType"><option value="auto">Auto detect</option><option value="docker">Dockerfile</option><option value="node">Node.js</option><option value="python">Python</option><option value="static">Static</option></select></label>
         <label>Internal port<input name="internalPort" type="number" value="3000" min="1" max="65535" /></label>
         <label>Health path<input name="healthPath" value="/" /></label>
-        <label>Service type<select name="kind"><option value="web">Web service</option><option value="worker">Worker</option></select></label>
+        <label>Service type<select name="kind"><option value="web">Web service</option><option value="worker">Worker</option><option value="cron">Cron job</option></select></label>
+        <label>Cron expression<input name="cronExpression" placeholder="0 2 * * *" /></label>
+        <label>Cron timezone<input name="cronTimezone" value="UTC" placeholder="America/New_York" /></label>
+        <label>Cron command<input name="cronCommand" placeholder="npm run nightly" /></label>
+        <label>Cron timeout (seconds)<input name="cronTimeoutSeconds" type="number" value="900" min="1" max="86400" /></label>
       </div>
       <div class="dialog-actions"><button value="cancel">Cancel</button><button class="primary" value="default">Create project</button></div>
     </form>
