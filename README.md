@@ -22,6 +22,7 @@ The first release is deliberately **private-operator first**: it is designed to 
 - Managed PostgreSQL 17 and Redis 7 with generated encrypted credentials and automatic service environment-variable attachment.
 - Database backup, backup validation, and explicit destructive restore paths.
 - Pre-deploy commands for migrations.
+- Scheduled cron jobs using timezone/DST-aware expressions, immutable release images, one-off resource-limited containers, run history, manual run-now, timeout handling, logs, and alerts.
 - Live runtime log capture with known application secrets redacted.
 - Continuous application health probing.
 - Server CPU, memory, disk, load, container count, and heartbeat monitoring.
@@ -313,6 +314,29 @@ Managed databases:
 
 A restore stops the attached application first. Redeploy the application after restoration.
 
+## Cron jobs
+
+Create a service with type **Cron job** and configure:
+
+- a standard cron expression such as `0 2 * * *`
+- an IANA timezone such as `America/New_York`
+- the command to execute
+- a timeout in seconds
+
+Deploy/publish the cron service once so My Railway has an immutable image. The scheduler stores the next due timestamp and runs each occurrence as a short-lived container with the service's encrypted environment variables, persistent volumes, CPU/RAM/PID limits, and timeout.
+
+Cron runs record:
+
+- scheduled time
+- deployment/image used
+- runtime server
+- status
+- exit code
+- completion time
+- redacted logs
+
+Use **Run now** for a manual execution. A failed or timed-out cron run creates an alert; a later successful run resolves it.
+
 ## Rollbacks
 
 Every successful release retains its immutable image reference and runtime metadata.
@@ -396,6 +420,19 @@ It validates:
 - disposable volume create/write/read/remove lifecycle
 
 Use this after installation and after infrastructure maintenance.
+
+## Operator safety controls
+
+The dashboard supports:
+
+- cancelling deployments that are still safely queued
+- draining/resuming a runtime server so new work is not scheduled there
+- removing a domain and immediately refreshing the active Traefik route
+- removing a managed database while either retaining or explicitly deleting its Docker data volume
+- stopping/restarting long-running services
+- refreshing live runtime logs
+
+Use server drain mode before host maintenance. Drain mode stops new scheduling; it does not silently terminate existing application containers.
 
 ## Safe maintenance
 
