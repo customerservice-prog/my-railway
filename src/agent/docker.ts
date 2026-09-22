@@ -186,6 +186,165 @@ export async function restoreVolume(volumeName: string, fileName: string, servic
   return { restored: safe };
 }
 
+export type DatabasePayload = {
+  databaseId: string;
+  kind: "postgres"|"redis";
+  dockerName: string;
+  volumeName: string;
+  username?: string|null;
+  password: string;
+  databaseName?: string|null;
+};
+
+export async function provisionDatabase(payload: DatabasePayload) {
+  const image = payload.kind === "postgres" ? "postgres:17-alpine" : "redis:7-alpine";
+  await docker(["pull", image], 10 * 60_000);
+  await docker(["volume","create",payload.volumeName]);
+  await docker(["rm","-f",payload.dockerName]).catch(()=>{});
+
+  const environment = payload.kind === "postgres"
+    ? {
+        POSTGRES_USER: payload.username ?? "myrailway",
+        POSTGRES_PASSWORD: payload.password,
+        POSTGRES_DB: payload.databaseName ?? "app"
+      }
+    : { REDIS_PASSWORD: payload.password };
+
+  const envData = await envFile(environment);
+  try {
+    const args = [
+      "run","-d",
+      "--name",payload.dockerName,
+      "--network",network,
+      "--restart","unless-stopped",
+      "--cpus","1",
+      "--memory","1024m",
+      "--pids-limit","512",
+      "--env-file",envData.file,
+      "--label",`myrailway.database=${payload.databaseId}`,
+      "-v",`${payload.volumeName}:${payload.kind === "postgres" ? "/var/lib/postgresql/data" : "/data"}`,
+      image
+    ];
+    if (payload.kind === "redis") {
+      args.push("sh","-lc",'exec redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"');
+    }
+    await docker(args);
+
+    let lastError = "";
+    for (let i=0;i<40;i++) {
+      try {
+        if (payload.kind === "postgres") {
+          await docker(["exec",payload.dockerName,"sh","-lc",'PGPASSWORD="$POSTGRES_PASSWORD" pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"']);
+        } else {
+          const pong = await docker(["exec",payload.dockerName,"sh","-lc",'redis-cli -a "$REDIS_PASSWORD" ping 2>/dev/null']);
+          if (!pong.includes("PONG")) throw new Error("Redis did not return PONG");
+        }
+        return { dockerName:payload.dockerName, volumeName:payload.volumeName, ready:true };
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+        await sleep(1500);
+      }
+    }
+    throw new Error(`Database readiness check failed: ${lastError.slice(-1000)}`);
+  } catch (error) {
+    await docker(["rm","-f",payload.dockerName]).catch(()=>{});
+    throw error;
+  } finally {
+    await envData.cleanup();
+  }
+}
+
+async function streamDockerToFile(args: string[], target: string, timeoutMs=30*60_000) {
+  const { spawn } = await import("node:child_process");
+  const { createWriteStream } = await import("node:fs");
+  await new Promise<void>((resolve,reject)=>{
+    const child=spawn("docker",args,{stdio:["ignore","pipe","pipe"]});
+    const out=createWriteStream(target,{mode:0o600});
+    let stderr="";
+    const timer=setTimeout(()=>child.kill("SIGKILL"),timeoutMs);
+    child.stdout.pipe(out);
+    child.stderr.on("data",(chunk)=>{stderr=(stderr+chunk.toString()).slice(-8000);});
+    child.on("error",(error)=>{clearTimeout(timer);out.destroy();reject(error);});
+    child.on("close",(code)=>{
+      clearTimeout(timer);
+      out.end();
+      code===0?resolve():reject(new Error(`docker command failed (${code}): ${stderr}`));
+    });
+  });
+}
+
+export async function backupDatabase(payload: DatabasePayload & {backupName:string}) {
+  await fs.mkdir(backupDir,{recursive:true});
+  const safe=payload.backupName.replace(/[^a-zA-Z0-9_.-]/g,"-");
+  if(payload.kind==="postgres"){
+    const file=`${safe}.dump`;
+    const target=path.join(backupDir,file);
+    await streamDockerToFile([
+      "exec",payload.dockerName,"sh","-lc",
+      'PGPASSWORD="$POSTGRES_PASSWORD" exec pg_dump -Fc -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+    ],target);
+    const stat=await fs.stat(target);
+    return {location:target,sizeBytes:stat.size};
+  }
+
+  await docker(["exec",payload.dockerName,"sh","-lc",'redis-cli -a "$REDIS_PASSWORD" SAVE >/dev/null 2>&1']);
+  const file=`${safe}.rdb`;
+  const target=path.join(backupDir,file);
+  await docker(["cp",`${payload.dockerName}:/data/dump.rdb`,target],5*60_000);
+  await fs.chmod(target,0o600).catch(()=>{});
+  const stat=await fs.stat(target);
+  return {location:target,sizeBytes:stat.size};
+}
+
+export async function testDatabaseBackup(payload: {kind:"postgres"|"redis";dockerName:string;fileName:string}) {
+  const safe=path.basename(payload.fileName);
+  if(payload.kind==="postgres"){
+    await docker(["cp",path.join(backupDir,safe),`${payload.dockerName}:/tmp/myrailway-test.dump`],5*60_000);
+    try {
+      await docker(["exec",payload.dockerName,"pg_restore","--list","/tmp/myrailway-test.dump"],5*60_000);
+    } finally {
+      await docker(["exec",payload.dockerName,"rm","-f","/tmp/myrailway-test.dump"]).catch(()=>{});
+    }
+    return {tested:safe,format:"postgres-custom"};
+  }
+  await docker([
+    "run","--rm","-v",`${backupDir}:/backup:ro`,"redis:7-alpine",
+    "redis-check-rdb",`/backup/${safe}`
+  ],5*60_000);
+  return {tested:safe,format:"redis-rdb"};
+}
+
+export async function restoreDatabase(payload: DatabasePayload & {fileName:string;serviceId?:string|null}) {
+  if(payload.serviceId) await stopService(payload.serviceId);
+  const safe=path.basename(payload.fileName);
+  if(payload.kind==="postgres"){
+    await docker(["cp",path.join(backupDir,safe),`${payload.dockerName}:/tmp/myrailway-restore.dump`],5*60_000);
+    try {
+      await docker([
+        "exec",payload.dockerName,"sh","-lc",
+        'PGPASSWORD="$POSTGRES_PASSWORD" pg_restore --clean --if-exists --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB" /tmp/myrailway-restore.dump'
+      ],30*60_000);
+    } finally {
+      await docker(["exec",payload.dockerName,"rm","-f","/tmp/myrailway-restore.dump"]).catch(()=>{});
+    }
+    return {restored:safe};
+  }
+
+  await docker(["stop",payload.dockerName],2*60_000);
+  try {
+    await docker([
+      "run","--rm",
+      "-v",`${payload.volumeName}:/data`,
+      "-v",`${backupDir}:/backup:ro`,
+      "alpine:3.20","sh","-lc",
+      `cp /backup/${safe} /data/dump.rdb && chmod 644 /data/dump.rdb`
+    ],5*60_000);
+  } finally {
+    await docker(["start",payload.dockerName],2*60_000);
+  }
+  return {restored:safe};
+}
+
 export type RuntimeHealth = {
   serviceId: string;
   deploymentId: string | null;
