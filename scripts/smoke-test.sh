@@ -216,6 +216,23 @@ MAINT_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse
 wait_command "$MAINT_COMMAND" "disable maintenance"
 test -z "$(docker ps -q --filter "label=myrailway.maintenance.service=$SERVICE_ID")"
 
+checkpoint "multi-service project"
+node -e 'require("fs").writeFileSync("/tmp/service-create.json",JSON.stringify({name:"Smoke Worker",repoFullName:"octocat/Hello-World",branch:"master",kind:"worker",buildType:"auto",internalPort:3000,healthPath:"/"}))'
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/service-create-response.json -w '%{http_code}' -H 'content-type: application/json' --data-binary @/tmp/service-create.json "http://127.0.0.1:8080/api/projects/$PROJECT_ID/services")"
+expect_status "$STATUS" "201" "create sibling worker service" /tmp/service-create-response.json
+SIBLING_SERVICE_ID="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/service-create-response.json","utf8")).id)')"
+
+curl -fsS -b /tmp/cookies.txt "http://127.0.0.1:8080/api/projects/$PROJECT_ID" > /tmp/project-multi.json
+node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/project-multi.json","utf8"));if(x.services.length!==2||!x.services.some(s=>s.id===process.argv[1])||!x.services.some(s=>s.id===process.argv[2]))process.exit(1)' "$SERVICE_ID" "$SIBLING_SERVICE_ID"
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/service-delete.json -w '%{http_code}' -X DELETE "http://127.0.0.1:8080/api/services/$SIBLING_SERVICE_ID")"
+expect_status "$STATUS" "200" "delete sibling stateless service" /tmp/service-delete.json
+curl -fsS -b /tmp/cookies.txt "http://127.0.0.1:8080/api/projects/$PROJECT_ID" > /tmp/project-after-service-delete.json
+node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/project-after-service-delete.json","utf8"));if(x.services.length!==1||x.services[0].id!==process.argv[1])process.exit(1)' "$SERVICE_ID"
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/last-service-delete.json -w '%{http_code}' -X DELETE "http://127.0.0.1:8080/api/services/$SERVICE_ID")"
+expect_status "$STATUS" "409" "protect last service from standalone deletion" /tmp/last-service-delete.json
+
 checkpoint "managed Redis provision"
 node -e 'require("fs").writeFileSync("/tmp/database-create.json",JSON.stringify({kind:"redis",name:"Smoke Redis",serviceId:process.argv[1],variableKey:"SMOKE_REDIS_URL"}))' "$SERVICE_ID"
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/database-create-response.json -w '%{http_code}' -H 'content-type: application/json' --data-binary @/tmp/database-create.json "http://127.0.0.1:8080/api/projects/$PROJECT_ID/databases")"
