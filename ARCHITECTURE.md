@@ -219,6 +219,17 @@ new container -> start -> health -> ready
 
 This is service-level blue/green behavior on a single Docker host.
 
+### Release image identity
+
+A Git commit is source identity, not built-release identity. The same commit can be deployed with a different service root, Dockerfile selection, build command, or platform configuration.
+
+My Railway therefore tags each build with both:
+
+- short commit SHA;
+- unique deployment identity.
+
+No later build reuses that release tag. Rollback always references the exact retained build tag from the historical deployment.
+
 ## Rollback model
 
 A successful deployment stores:
@@ -234,6 +245,33 @@ Rollback creates a **new deployment record** referencing the old image. It does 
 No rebuild is necessary.
 
 Database state is not automatically reversed. Application rollback and database rollback are intentionally separate operations.
+
+### Pre-deploy recovery boundary
+
+For normal deployments with a configured pre-deploy/migration command, the worker creates recovery points before dispatching the runtime migration:
+
+```text
+build image
+   |
+choose runtime
+   |
+backup attached managed DBs
+   |
+backup attached writable volumes
+   |
+all backups completed?
+   | yes
+   v
+run pre-deploy command
+   |
+start candidate
+   |
+health gate / cutover
+```
+
+A failed backup prevents migration from starting.
+
+Rollback/auto-rollback sets the runtime pre-deploy command to null, so a code rollback cannot accidentally rerun the current migration script.
 
 ## Secrets model
 
