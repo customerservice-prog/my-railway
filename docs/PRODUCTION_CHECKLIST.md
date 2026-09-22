@@ -407,3 +407,26 @@ These are intentionally **not** required for private v1, but are mandatory befor
 - [ ] Disable maintenance.
 - [ ] Maintenance responder is removed.
 - [ ] Current application route is restored without rebuilding.
+
+
+## Launch readiness screen
+
+Before the first real migration:
+
+- [ ] Platform -> Launch readiness opens without error.
+- [ ] Administrator account passes.
+- [ ] TOTP passes.
+- [ ] Core platform secrets pass.
+- [ ] GitHub repository access passes using GitHub App where possible.
+- [ ] Public hostname passes.
+- [ ] Secure cookie passes.
+- [ ] ACME email passes.
+- [ ] Control-plane DNS passes.
+- [ ] At least one runtime agent passes.
+- [ ] Independent updater passes.
+- [ ] AUTO_BACKUPS passes.
+- [ ] AUTO_PREDEPLOY_BACKUPS passes.
+- [ ] Recent control-plane backup passes.
+- [ ] No unresolved critical alerts.
+- [ ] Any remaining warnings have an explicit documented reason.
+- [ ] Launch readiness reports zero blockers before a critical-site migration.
