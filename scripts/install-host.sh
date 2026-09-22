@@ -125,6 +125,8 @@ set_env PLATFORM_HOST "$PLATFORM_HOST"
 set_env PUBLIC_IP "$PUBLIC_IP"
 set_env ACME_EMAIL "$ACME_EMAIL"
 set_env COOKIE_SECURE "true"
+set_env HOST_PROJECT_DIR "$INSTALL_DIR"
+set_env PLATFORM_UPDATE_REF "$INSTALL_BRANCH"
 
 if grep -q '^GITHUB_WEBHOOK_SECRET=replace-me$' .env || ! grep -q '^GITHUB_WEBHOOK_SECRET=' .env; then
   set_env GITHUB_WEBHOOK_SECRET "$(openssl rand -hex 32)"
