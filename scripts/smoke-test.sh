@@ -245,6 +245,17 @@ for _ in $(seq 1 60); do
 done
 node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/servers.json","utf8"));if(!x.some(s=>s.id==="local-runtime-01"&&s.online))process.exit(1)'
 
+checkpoint "platform control-plane backup metadata"
+docker compose up -d --no-build platform-backup
+for _ in $(seq 1 90); do
+  curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/backups > /tmp/platform-backups.json
+  if node -e 'const fs=require("fs");const rows=JSON.parse(fs.readFileSync("/tmp/platform-backups.json","utf8"));process.exit(rows.some(b=>b.kind==="platform"&&b.status==="completed")?0:1)' 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+node -e 'const fs=require("fs");const rows=JSON.parse(fs.readFileSync("/tmp/platform-backups.json","utf8"));const b=rows.find(x=>x.kind==="platform"&&x.status==="completed");if(!b||!b.location||Number(b.size_bytes||0)<=0)process.exit(1)'
+
 checkpoint "launch readiness assessment"
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/readiness.json -w '%{http_code}' http://127.0.0.1:8080/api/platform/readiness)"
 expect_status "$STATUS" "200" "platform readiness endpoint" /tmp/readiness.json
@@ -260,6 +271,7 @@ if(byId.admin.status!=="pass") process.exit(1);
 if(byId.totp.status!=="pass") process.exit(1);
 if(byId.runtime.status!=="pass") process.exit(1);
 if(byId.updater.status!=="pass") process.exit(1);
+if(byId["platform-backup"].status!=="pass") process.exit(1);
 if(byId["github-source"].status!=="blocker") process.exit(1);
 if(byId["offsite-backup"].status!=="warning") process.exit(1);
 if(r.ready!==false || Number(r.blockers)<1) process.exit(1);
