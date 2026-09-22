@@ -335,7 +335,8 @@ async function runAutomaticBackups() {
 
   const volumes=await query<any>(`
     SELECT v.* FROM volumes v
-    WHERE NOT EXISTS (
+    WHERE v.status IN ('attached','detached','delete_failed')
+      AND NOT EXISTS (
       SELECT 1 FROM backups b
       WHERE b.volume_id=v.id AND b.created_at > now()-interval '20 hours' AND b.status IN ('queued','completed')
     )
@@ -1725,6 +1726,7 @@ app.post("/api/volumes/:id/backup", auth, async (req: AuthedRequest, res) => {
     WHERE v.id=$1
   `, [String(req.params.id)]);
   if (!volume) return res.status(404).json({ error: "volume not found" });
+  if (volume.status === "deleting") return res.status(409).json({ error: "volume cleanup is in progress" });
   const active = await one<any>(`
     SELECT server_id FROM deployments
     WHERE service_id=$1 AND server_id IS NOT NULL
