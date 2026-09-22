@@ -629,12 +629,14 @@ app.get("/api/projects/:id", auth, async (req, res) => {
     service.variables = await query("SELECT id,key,is_secret,created_at,updated_at FROM variables WHERE service_id=$1 ORDER BY key", [service.id]);
     service.volumes = await query("SELECT * FROM volumes WHERE service_id=$1 ORDER BY created_at", [service.id]);
     service.deployments = await query("SELECT * FROM deployments WHERE service_id=$1 ORDER BY created_at DESC LIMIT 30", [service.id]);
+    service.health = await one("SELECT * FROM service_health WHERE service_id=$1", [service.id]);
     service.cron_runs = service.kind === "cron"
       ? await query("SELECT * FROM cron_runs WHERE service_id=$1 ORDER BY scheduled_for DESC LIMIT 50", [service.id])
       : [];
   }
   const databases = await query(`
-    SELECT id,project_id,service_id,kind,name,docker_name,volume_name,server_id,username,database_name,variable_key,status,created_at,updated_at
+    SELECT id,project_id,service_id,kind,name,docker_name,volume_name,server_id,username,database_name,variable_key,
+      status,last_health_at,health_message,consecutive_failures,created_at,updated_at
     FROM database_resources WHERE project_id=$1 ORDER BY created_at
   `, [project.id]);
   res.json({ ...project, services, databases });
@@ -966,7 +968,8 @@ app.get("/api/backups", auth, async (_req, res) => {
 
 app.get("/api/databases", auth, async (_req, res) => {
   res.json(await query(`
-    SELECT d.id,d.project_id,d.service_id,d.kind,d.name,d.docker_name,d.volume_name,d.server_id,d.username,d.database_name,d.variable_key,d.status,d.created_at,d.updated_at,
+    SELECT d.id,d.project_id,d.service_id,d.kind,d.name,d.docker_name,d.volume_name,d.server_id,d.username,d.database_name,d.variable_key,
+      d.status,d.last_health_at,d.health_message,d.consecutive_failures,d.created_at,d.updated_at,
       p.name project_name
     FROM database_resources d JOIN projects p ON p.id=d.project_id
     ORDER BY d.created_at DESC
