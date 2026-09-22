@@ -208,3 +208,34 @@ PLATFORM_UPDATE_REF=release/private-v1-rc1
 When the release branch advances, the dashboard detects the new commit. The independent updater performs backup, candidate build, health gating, platform replacement, and rollback if activation fails.
 
 The manual `./scripts/upgrade.sh` path remains available as an emergency/fallback operator tool.
+
+
+## Launch readiness after first boot
+
+After creating the administrator and enabling TOTP, open:
+
+```text
+Platform -> Launch readiness
+```
+
+Do not migrate a critical application while the page shows blockers.
+
+Expected production setup should eventually show passes for:
+
+- administrator / TOTP
+- core secrets
+- GitHub App
+- public hostname
+- secure cookie
+- ACME email
+- DNS
+- runtime agent
+- updater
+- automatic backups
+- pre-migration recovery backups
+- recent platform backup
+- no critical alerts
+
+Offsite disaster recovery is shown separately so you can distinguish "the platform can run" from "the platform can survive losing this entire server."
+
+The readiness screen never returns secret values; it only reports whether required configuration is present and healthy.
