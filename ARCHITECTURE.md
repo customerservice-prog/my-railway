@@ -474,3 +474,61 @@ Before accepting untrusted users, add:
 - support/audit retention policy
 
 That should be a separate security milestone, not a toggle on the private v1.
+
+
+## Platform supervisor / self-update boundary
+
+A deployment platform cannot safely replace its own control plane if the only deployment authority lives inside that same process.
+
+My Railway therefore has a separate `updater` supervisor:
+
+```text
+                    +----------------------+
+Browser ---------->| Control Plane        |
+                    +----------+-----------+
+                               |
+                               | authenticated internal request
+                               v
+                    +----------------------+
+                    | Updater Supervisor   |
+                    | survives replacement |
+                    +----------+-----------+
+                               |
+                 Docker socket + host Git checkout
+                               |
+          +--------------------+--------------------+
+          |                    |                    |
+          v                    v                    v
+    Candidate Control     Worker / Agent      Backup / Maintenance
+```
+
+The updater has no public port. The control plane communicates with it over the private Docker network using a separate high-entropy `PLATFORM_UPDATER_TOKEN`.
+
+The updater bind-mounts the host project checkout at the same absolute path on host/container so Docker Compose bind paths remain correct when Compose is invoked from inside the supervisor.
+
+### Self-update safety sequence
+
+1. Refuse concurrent updates.
+2. Refuse tracked local source changes.
+3. Resolve only the configured release ref/SHA.
+4. Create a pre-update PostgreSQL backup using the running database's own `pg_dump` binary so client/server majors match.
+5. Create a detached Git worktree for the target commit.
+6. Validate shell/Compose configuration.
+7. Build immutable candidate platform and updater images.
+8. Start a candidate control plane on the private network.
+9. Require candidate `/healthz`.
+10. If a public dashboard hostname exists, route dashboard traffic to the healthy candidate.
+11. Advance the host Git checkout.
+12. Recreate the stable-named platform services from the new image.
+13. Require final control-plane `/healthz`.
+14. Route traffic back to the stable `control` service.
+15. Replace the updater supervisor last.
+
+The previous platform image is retained as a rollback image. Source/image rollback is automatic on activation failure; database restoration remains an explicit operator action because schema rollback cannot safely be assumed.
+
+### CI proof
+
+The CI suite runs both:
+
+- a no-op updater smoke test pinned to the workflow's immutable SHA;
+- a full synthetic self-update test that creates another commit in a local release repository and makes the running platform update itself to that commit.
