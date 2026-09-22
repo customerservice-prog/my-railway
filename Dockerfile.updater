@@ -1,0 +1,10 @@
+FROM docker:cli AS dockercli
+
+FROM node:22-alpine
+RUN apk add --no-cache bash git curl openssl ca-certificates
+COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=dockercli /usr/local/libexec/docker/cli-plugins /usr/local/libexec/docker/cli-plugins
+WORKDIR /workspace
+COPY scripts/platform-updater.mjs /usr/local/bin/platform-updater.mjs
+EXPOSE 8090
+CMD ["node","/usr/local/bin/platform-updater.mjs"]
