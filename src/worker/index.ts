@@ -55,13 +55,13 @@ async function chooseServer(memoryMb: number) {
   if (localServerId) {
     return one<any>(`
       SELECT * FROM servers
-      WHERE id=$1 AND last_seen_at > now() - interval '45 seconds' AND memory_free_mb >= $2
+      WHERE id=$1 AND draining=false AND last_seen_at > now() - interval '45 seconds' AND memory_free_mb >= $2
       LIMIT 1
     `, [localServerId, memoryMb]);
   }
   return one<any>(`
     SELECT * FROM servers
-    WHERE last_seen_at > now() - interval '45 seconds'
+    WHERE draining=false AND last_seen_at > now() - interval '45 seconds'
       AND memory_free_mb >= $1
     ORDER BY load1 ASC NULLS LAST, memory_free_mb DESC
     LIMIT 1
@@ -137,16 +137,60 @@ async function buildImage(dep: Deployment): Promise<{image:string;runtimePort:nu
   }
 }
 
+async function acquireServiceLock(serviceId: string, deploymentId: string): Promise<(() => Promise<void>) | null> {
+  const lockKey = `deploy-lock:${serviceId}`;
+  const deadline = Date.now() + 30 * 60_000;
+  const renewScript = `
+    if redis.call("get", KEYS[1]) == ARGV[1] then
+      return redis.call("expire", KEYS[1], ARGV[2])
+    end
+    return 0
+  `;
+  const releaseScript = `
+    if redis.call("get", KEYS[1]) == ARGV[1] then
+      return redis.call("del", KEYS[1])
+    end
+    return 0
+  `;
+
+  while (Date.now() < deadline) {
+    const newest = await one<{id:string}>(
+      "SELECT id FROM deployments WHERE service_id=$1 ORDER BY created_at DESC LIMIT 1",
+      [serviceId]
+    );
+    if (newest?.id && newest.id !== deploymentId) {
+      await status(deploymentId, "SUPERSEDED");
+      await log(deploymentId, `Superseded by newer deployment ${newest.id} before acquiring the service lock.`);
+      return null;
+    }
+
+    const acquired = await redis.set(lockKey, deploymentId, "EX", 120, "NX");
+    if (acquired === "OK") {
+      const timer = setInterval(() => {
+        void redis.eval(renewScript, 1, lockKey, deploymentId, "120").catch((error) => {
+          console.error(`Failed to renew deployment lock ${lockKey}:`, error);
+        });
+      }, 30_000);
+      timer.unref();
+
+      return async () => {
+        clearInterval(timer);
+        await redis.eval(releaseScript, 1, lockKey, deploymentId).catch(() => 0);
+      };
+    }
+
+    await sleep(1500);
+  }
+
+  throw new Error("Timed out waiting for service deployment lock");
+}
+
 async function processDeployment(deploymentId: string) {
   let dep = await deploymentInfo(deploymentId);
   if (!dep) throw new Error("deployment not found");
 
-  const lockKey = `deploy-lock:${dep.service_id}`;
-  const locked = await redis.set(lockKey, deploymentId, "EX", 1800, "NX");
-  if (locked !== "OK") {
-    await log(deploymentId, "Another deployment for this service is already active; waiting.");
-    throw new Error("service deployment lock busy");
-  }
+  const releaseLock = await acquireServiceLock(dep.service_id, deploymentId);
+  if (!releaseLock) return;
 
   try {
     const newest = await one<{id:string}>("SELECT id FROM deployments WHERE service_id=$1 ORDER BY created_at DESC LIMIT 1", [dep.service_id]);
@@ -226,7 +270,7 @@ async function processDeployment(deploymentId: string) {
     await log(deploymentId, message, "error");
     throw error;
   } finally {
-    if (await redis.get(lockKey) === deploymentId) await redis.del(lockKey);
+    await releaseLock();
   }
 }
 
