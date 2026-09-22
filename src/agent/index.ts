@@ -56,6 +56,7 @@ async function execute(command: any) {
     case "RESTORE_VOLUME": return restoreVolume(String(command.payload.volumeName), String(command.payload.fileName), command.payload.serviceId ? String(command.payload.serviceId) : undefined);
     case "FETCH_LOGS": return runtimeLogs(String(command.payload.serviceId));
     case "SELF_TEST": return platformSelfTest();
+    case "REFRESH_ROUTE": return refreshServiceRoute(String(command.payload.serviceId), Array.isArray(command.payload.domains) ? command.payload.domains.map(String) : []);
     case "PROVISION_DATABASE": return provisionDatabase(command.payload as DatabasePayload);
     case "BACKUP_DATABASE": return backupDatabase(command.payload);
     case "TEST_DATABASE_BACKUP": return testDatabaseBackup(command.payload);
