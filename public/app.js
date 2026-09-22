@@ -448,12 +448,12 @@ async function renderAlerts() {
 async function renderSecurity() {
   const { user } = await api("/api/auth/me");
   $("#content").innerHTML = `
-    <div class="panel" style="max-width:760px">
+    <div class="panel narrow">
       <div style="padding:22px">
-        <div class="section-head" style="margin-top:0"><h3>Administrator security</h3></div>
+        <div class="section-head no-top"><h3>Administrator security</h3></div>
         <div class="kv"><span class="muted">Email</span><span>${esc(user.email)}</span></div>
         <div class="kv"><span class="muted">Two-factor auth</span><span><span class="pill ${user.totp_enabled ? "good" : "warn"}">${user.totp_enabled ? "enabled" : "not enabled"}</span></span></div>
-        ${user.totp_enabled ? "" : '<div class="row" style="margin-top:16px"><button id="enroll-totp" class="primary">Set up authenticator</button></div>'}
+        ${user.totp_enabled ? "" : '<div class="row mt16"><button id="enroll-totp" class="primary">Set up authenticator</button></div>'}
         <div id="totp-setup"></div>
       </div>
     </div>
@@ -465,9 +465,9 @@ async function renderSecurity() {
         <div class="section-head"><h3>Authenticator setup</h3></div>
         <p class="muted">Add this secret to your authenticator app, then enter the six-digit code to confirm.</p>
         <div class="kv"><span class="muted">Secret</span><span class="mono">${esc(enrollment.secret)}</span></div>
-        <div class="kv"><span class="muted">URI</span><span class="mono" style="overflow-wrap:anywhere">${esc(enrollment.uri)}</span></div>
+        <div class="kv"><span class="muted">URI</span><span class="mono break-anywhere">${esc(enrollment.uri)}</span></div>
         <form id="confirm-totp" class="row" style="margin-top:16px">
-          <input id="totp-confirm-code" inputmode="numeric" placeholder="123456" style="max-width:180px" required>
+          <input id="totp-confirm-code" inputmode="numeric" placeholder="123456" class="max180" required>
           <button class="primary">Enable 2FA</button>
         </form>
       `;
@@ -559,19 +559,19 @@ async function openProject(id) {
       <label>Start command<input name="startCommand" value="${esc(service.start_command || "")}" placeholder="auto"></label>
       <label>Pre-deploy / migration command<input name="predeployCommand" value="${esc(service.predeploy_command || "")}" placeholder="npx prisma migrate deploy"></label>
       <label><span>Automatic deploys</span><select name="autoDeploy"><option value="true" ${service.auto_deploy ? "selected" : ""}>Enabled</option><option value="false" ${!service.auto_deploy ? "selected" : ""}>Disabled</option></select></label>
-      <div class="row" style="align-self:end"><button class="primary" type="submit">Save settings</button></div>
+      <div class="row align-end"><button class="primary" type="submit">Save settings</button></div>
     </form>
 
     <div class="section-head"><h3>Domains</h3></div>
     ${domains}
-    <form id="add-domain-form" class="row" style="margin-top:12px">
-      <input id="new-domain" placeholder="app.example.com" required style="max-width:320px">
+    <form id="add-domain-form" class="row mt12">
+      <input id="new-domain" placeholder="app.example.com" required class="max320">
       <button>Add domain</button>
     </form>
 
     <div class="section-head"><h3>Environment secrets</h3></div>
     <div class="row">${secrets}</div>
-    <form id="secret-form" class="form-grid" style="margin-top:12px">
+    <form id="secret-form" class="form-grid mt12">
       <label>Variable<input id="secret-key" placeholder="DATABASE_URL" required></label>
       <label>Secret value<input id="secret-value" type="password" required></label>
       <div class="row"><button>Add / replace secret</button></div>
@@ -579,7 +579,7 @@ async function openProject(id) {
 
     <div class="section-head"><h3>Persistent volumes</h3></div>
     ${volumes}
-    <form id="volume-form" class="form-grid" style="margin-top:12px">
+    <form id="volume-form" class="form-grid mt12">
       <label>Name<input id="volume-name" placeholder="uploads" required></label>
       <label>Mount path<input id="volume-path" placeholder="/app/uploads" required></label>
       <div class="row"><button>Add volume</button></div>
@@ -587,11 +587,11 @@ async function openProject(id) {
 
     <div class="section-head"><h3>Managed databases</h3></div>
     ${databases}
-    <form id="database-form" class="form-grid" style="margin-top:12px">
+    <form id="database-form" class="form-grid mt12">
       <label>Type<select id="database-kind"><option value="postgres">PostgreSQL</option><option value="redis">Redis</option></select></label>
       <label>Name<input id="database-name" placeholder="Production DB" required></label>
       <label>Environment variable<input id="database-variable" placeholder="DATABASE_URL"></label>
-      <div class="row" style="align-self:end"><button>Add database</button></div>
+      <div class="row align-end"><button>Add database</button></div>
     </form>
 
     <div class="section-head"><h3>Deployment history</h3></div>
