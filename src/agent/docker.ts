@@ -97,7 +97,10 @@ export async function deploy(payload: DeployPayload) {
       "--pids-limit","512",
       "--env-file",envData.file,
       "--label",`myrailway.service=${payload.serviceId}`,
-      "--label",`myrailway.deployment=${payload.deploymentId}`
+      "--label",`myrailway.deployment=${payload.deploymentId}`,
+      "--label",`myrailway.kind=${payload.kind}`,
+      "--label",`myrailway.port=${payload.port}`,
+      "--label",`myrailway.healthPath=${payload.healthPath || "/"}`
     ];
     for (const volume of payload.volumes ?? []) {
       args.push("-v", `${volume.name}:${volume.mountPath}${volume.readOnly ? ":ro" : ""}`);
@@ -181,6 +184,67 @@ export async function restoreVolume(volumeName: string, fileName: string, servic
     `rm -rf /target/* /target/.[!.]* /target/..?* 2>/dev/null || true; tar xzf /backup/${safe} -C /target`
   ], 30 * 60_000);
   return { restored: safe };
+}
+
+export type RuntimeHealth = {
+  serviceId: string;
+  deploymentId: string | null;
+  containerName: string;
+  running: boolean;
+  healthy: boolean;
+  statusCode: number | null;
+  latencyMs: number | null;
+  message: string | null;
+};
+
+export async function runtimeServiceHealth(): Promise<RuntimeHealth[]> {
+  const out = await docker(["ps","-a","--filter","label=myrailway.service","--format","{{.Names}}"]);
+  const names = out ? out.split("\n").filter(Boolean) : [];
+  const results: RuntimeHealth[] = [];
+  for (const name of names) {
+    try {
+      const raw = await docker(["inspect",name]);
+      const info = JSON.parse(raw)?.[0];
+      const labels = info?.Config?.Labels ?? {};
+      const running = Boolean(info?.State?.Running);
+      const kind = labels["myrailway.kind"] ?? "web";
+      const serviceId = labels["myrailway.service"];
+      const deploymentId = labels["myrailway.deployment"] ?? null;
+      if (!serviceId) continue;
+      if (!running) {
+        results.push({serviceId,deploymentId,containerName:name,running:false,healthy:false,statusCode:null,latencyMs:null,message:info?.State?.Status ?? "not running"});
+        continue;
+      }
+      if (kind !== "web") {
+        results.push({serviceId,deploymentId,containerName:name,running:true,healthy:true,statusCode:null,latencyMs:null,message:"worker running"});
+        continue;
+      }
+      const port = Number(labels["myrailway.port"] ?? 80);
+      const healthPath = labels["myrailway.healthPath"] ?? "/";
+      const ip = info?.NetworkSettings?.Networks?.[network]?.IPAddress;
+      const target = ip || name;
+      const started = Date.now();
+      try {
+        const response = await fetch(`http://${target}:${port}${healthPath}`, { signal: AbortSignal.timeout(5000) });
+        results.push({
+          serviceId,deploymentId,containerName:name,running:true,healthy:response.ok,
+          statusCode:response.status,latencyMs:Date.now()-started,
+          message:response.ok ? null : `HTTP ${response.status}`
+        });
+      } catch (error) {
+        results.push({
+          serviceId,deploymentId,containerName:name,running:true,healthy:false,statusCode:null,
+          latencyMs:Date.now()-started,message:error instanceof Error ? error.message : String(error)
+        });
+      }
+    } catch (error) {
+      results.push({
+        serviceId:"unknown",deploymentId:null,containerName:name,running:false,healthy:false,statusCode:null,latencyMs:null,
+        message:error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+  return results.filter((item)=>item.serviceId !== "unknown");
 }
 
 export async function runtimeStats() {
