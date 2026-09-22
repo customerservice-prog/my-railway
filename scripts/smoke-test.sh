@@ -622,26 +622,34 @@ for _ in $(seq 1 180); do
 done
 test "$SETTINGS_APPLIED" = true
 
-# The host file, reloaded control plane, and restarted updater must all reflect the saved settings.
-grep -q '^ALERT_WEBHOOK_URL=https://example.invalid/my-railway-ci$' .env
-grep -q '^AUTO_BACKUPS=false$' .env
+# The authenticated settings API is the verification surface. The host .env is intentionally
+# mode 0600 and should not be readable by an unprivileged CI/user account.
 node - <<'NODE'
 const fs=require("fs");
 const x=JSON.parse(fs.readFileSync("/tmp/platform-settings-after.json","utf8"));
 if(x.settings.ALERT_WEBHOOK_URL!=="https://example.invalid/my-railway-ci") process.exit(1);
 if(x.settings.AUTO_BACKUPS!==false) process.exit(1);
 if(x.settings.AUTO_PREDEPLOY_BACKUPS!==true) process.exit(1);
+if(x.settings.AUTO_ROLLBACK!==false) process.exit(1);
 NODE
 
 for _ in $(seq 1 60); do
   if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && \
-     curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/platform/update/info >/tmp/updater-after-settings.json 2>/dev/null; then
+     curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/platform/update/info >/tmp/updater-after-settings.json 2>/dev/null && \
+     curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/platform/settings >/tmp/platform-settings-reloaded.json 2>/dev/null; then
     break
   fi
   sleep 2
 done
 curl -fsS http://127.0.0.1:8080/healthz >/dev/null
 curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/platform/update/info >/tmp/updater-after-settings.json
+curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/platform/settings >/tmp/platform-settings-reloaded.json
+node - <<'NODE'
+const fs=require("fs");
+const x=JSON.parse(fs.readFileSync("/tmp/platform-settings-reloaded.json","utf8"));
+if(x.settings.ALERT_WEBHOOK_URL!=="https://example.invalid/my-railway-ci") process.exit(1);
+if(x.settings.AUTO_BACKUPS!==false) process.exit(1);
+NODE
 
 checkpoint "stateless project deletion"
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/project-delete.json -w '%{http_code}' -X DELETE "http://127.0.0.1:8080/api/projects/$PROJECT_ID")"
