@@ -35,8 +35,8 @@ NODE
 }
 
 fail() {
-  local code="$?"
-  local message="Platform settings apply failed (exit $code)"
+  local code="${1:-1}"
+  local message="${2:-Platform settings apply failed (exit $code)}"
   trap - ERR
   set +e
   log "$message"
@@ -48,7 +48,8 @@ fail() {
 
     if bash "$ROOT/scripts/bootstrap.sh"; then
       log "Recreating management services with restored settings."
-      docker compose -f "$ROOT/docker-compose.yml" --project-directory "$ROOT" up -d --no-build --force-recreate         traefik control worker agent maintenance platform-backup || true
+      docker compose -f "$ROOT/docker-compose.yml" --project-directory "$ROOT" up -d --no-build --force-recreate \
+        traefik control worker agent maintenance platform-backup || true
 
       RESTORED_CONTROL=""
       for _ in $(seq 1 60); do
@@ -59,13 +60,21 @@ fail() {
         fi
         sleep 2
       done
+
+      if [ -z "$RESTORED_CONTROL" ] || ! docker exec "$RESTORED_CONTROL" curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+        log "Rollback was attempted but the restored control plane is still unhealthy."
+      fi
+    else
+      log "Rollback bootstrap failed."
     fi
+  else
+    log "No last-known-good environment snapshot was available for rollback."
   fi
 
   write_state failed "$message"
   exit "$code"
 }
-trap fail ERR
+trap 'code=$?; fail "$code" "Platform settings apply failed (exit $code)"' ERR
 
 : > "$LOG"
 write_state running
@@ -88,8 +97,7 @@ for _ in $(seq 1 90); do
 done
 
 if [ -z "$CONTROL" ] || ! docker exec "$CONTROL" curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
-  log "Updated control plane did not become healthy."
-  exit 1
+  fail 1 "Updated control plane did not become healthy after applying platform settings."
 fi
 
 log "Control plane is healthy. Scheduling updater restart last."
