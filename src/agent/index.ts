@@ -1,6 +1,6 @@
 import { env } from "../shared/env.js";
 import { sleep } from "../shared/util.js";
-import { backupVolume, deploy, platformSelfTest, restartService, restoreVolume, runtimeLogs, runtimeServiceHealth, runtimeStats, stopService, testVolumeBackup, type DeployPayload } from "./docker.js";
+import { backupDatabase, backupVolume, deploy, platformSelfTest, provisionDatabase, restartService, restoreDatabase, restoreVolume, runtimeLogs, runtimeServiceHealth, runtimeStats, stopService, testDatabaseBackup, testVolumeBackup, type DatabasePayload, type DeployPayload } from "./docker.js";
 
 const control = env("CONTROL_PLANE_URL", "http://localhost:8080").replace(/\/$/,"");
 const token = env("AGENT_TOKEN");
@@ -56,6 +56,10 @@ async function execute(command: any) {
     case "RESTORE_VOLUME": return restoreVolume(String(command.payload.volumeName), String(command.payload.fileName), command.payload.serviceId ? String(command.payload.serviceId) : undefined);
     case "FETCH_LOGS": return runtimeLogs(String(command.payload.serviceId));
     case "SELF_TEST": return platformSelfTest();
+    case "PROVISION_DATABASE": return provisionDatabase(command.payload as DatabasePayload);
+    case "BACKUP_DATABASE": return backupDatabase(command.payload);
+    case "TEST_DATABASE_BACKUP": return testDatabaseBackup(command.payload);
+    case "RESTORE_DATABASE": return restoreDatabase(command.payload);
     default: throw new Error(`unknown command: ${command.action}`);
   }
 }
