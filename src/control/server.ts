@@ -18,6 +18,8 @@ const app = express();
 const port = Number(process.env.PORT ?? 8080);
 const sessionSecret = env("SESSION_SECRET");
 const agentToken = env("AGENT_TOKEN");
+const updaterUrl = optionalEnv("PLATFORM_UPDATER_URL") ?? "http://updater:8090";
+const updaterToken = optionalEnv("PLATFORM_UPDATER_TOKEN");
 const cookieSecure = boolEnv("COOKIE_SECURE", false);
 
 app.set("trust proxy", 1);
@@ -135,6 +137,26 @@ function agentAuth(req: Request, res: Response, next: NextFunction) {
     return res.status(401).json({ error: "invalid agent token" });
   }
   next();
+}
+
+async function platformUpdaterRequest(pathname: string, init: RequestInit = {}) {
+  if (!updaterToken) throw new Error("platform updater token is not configured");
+  const response = await fetch(updaterUrl.replace(/\/$/, "") + pathname, {
+    ...init,
+    headers: {
+      "content-type":"application/json",
+      "authorization":`Bearer ${updaterToken}`,
+      ...(init.headers ?? {})
+    },
+    signal:AbortSignal.timeout(30_000)
+  });
+  const data = await response.json().catch(()=>({}));
+  if (!response.ok) {
+    const error = new Error(String((data as any)?.error ?? `updater request failed: ${response.status}`));
+    (error as any).status = response.status;
+    throw error;
+  }
+  return data as any;
 }
 
 async function audit(actor: string, action: string, targetType?: string, targetId?: string, detail: unknown = {}) {
@@ -1823,6 +1845,39 @@ app.post("/api/services/:id/logs/refresh", auth, async (req: AuthedRequest, res)
   const commandId = await enqueueAgentCommand(active.server_id,"FETCH_LOGS",{ serviceId },active.id);
   await audit(req.userId ?? "unknown", "runtime.logs.refresh", "service", serviceId);
   res.status(202).json({ commandId, deploymentId: active.id });
+});
+
+app.get("/api/platform/update/info", auth, async (_req, res) => {
+  try {
+    res.json(await platformUpdaterRequest("/info"));
+  } catch (error) {
+    const status = Number((error as any)?.status ?? 503);
+    res.status(status).json({ error:error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get("/api/platform/update/status", auth, async (_req, res) => {
+  try {
+    res.json(await platformUpdaterRequest("/status"));
+  } catch (error) {
+    const status = Number((error as any)?.status ?? 503);
+    res.status(status).json({ error:error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post("/api/platform/update", auth, async (req: AuthedRequest, res) => {
+  try {
+    const result = await platformUpdaterRequest("/update", { method:"POST", body:"{}" });
+    await audit(req.userId ?? "unknown","platform.update.requested","platform",String(result.jobId ?? "update"),{
+      ref:result.ref,
+      currentSha:result.currentSha,
+      targetSha:result.targetSha
+    });
+    res.status(202).json(result);
+  } catch (error) {
+    const status = Number((error as any)?.status ?? 503);
+    res.status(status).json({ error:error instanceof Error ? error.message : String(error) });
+  }
 });
 
 app.post("/api/platform/self-test", auth, async (req: AuthedRequest, res) => {
