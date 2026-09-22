@@ -887,6 +887,125 @@ app.post("/api/projects", auth, async (req: AuthedRequest, res) => {
   res.status(201).json({ id: projectId, serviceId });
 });
 
+app.post("/api/projects/:id/services", auth, async (req: AuthedRequest, res) => {
+  const projectId = String(req.params.id);
+  const project = await one<any>("SELECT id,name FROM projects WHERE id=$1", [projectId]);
+  if (!project) return res.status(404).json({ error: "project not found" });
+
+  const parsed = z.object({
+    name: z.string().min(1).max(80),
+    repoFullName: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+    branch: z.string().min(1).default("main"),
+    domain: z.string().min(3).optional(),
+    kind: z.enum(["web","worker","cron"]).default("web"),
+    buildType: z.enum(["auto","docker","node","python","static"]).default("auto"),
+    internalPort: z.number().int().min(1).max(65535).default(3000),
+    healthPath: z.string().startsWith("/").default("/"),
+    cronExpression: z.string().min(1).optional(),
+    cronTimezone: z.string().min(1).default("UTC"),
+    cronCommand: z.string().min(1).optional(),
+    cronTimeoutSeconds: z.number().int().min(1).max(86400).default(900)
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  if (parsed.data.kind === "cron") {
+    if (!parsed.data.cronExpression || !parsed.data.cronCommand) {
+      return res.status(400).json({ error: "cron services require cronExpression and cronCommand" });
+    }
+    const cronError = validateCron(parsed.data.cronExpression, parsed.data.cronTimezone);
+    if (cronError) return res.status(400).json({ error: `invalid cron schedule: ${cronError}` });
+  }
+
+  const serviceId = id("svc");
+  const nextCron = parsed.data.kind === "cron" && parsed.data.cronExpression
+    ? nextCronAt(parsed.data.cronExpression, parsed.data.cronTimezone, new Date(), serviceId)
+    : null;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `INSERT INTO services(
+        id,project_id,name,kind,repo_full_name,branch,build_type,internal_port,health_path,
+        cron_expression,cron_timezone,cron_command,cron_timeout_seconds,next_cron_at
+      ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+      [
+        serviceId,projectId,parsed.data.name,parsed.data.kind,parsed.data.repoFullName,parsed.data.branch,
+        parsed.data.buildType,parsed.data.internalPort,parsed.data.healthPath,
+        parsed.data.cronExpression ?? null,parsed.data.cronTimezone,parsed.data.cronCommand ?? null,
+        parsed.data.cronTimeoutSeconds,nextCron
+      ]
+    );
+    if (parsed.data.domain) {
+      await client.query(
+        "INSERT INTO domains(id,service_id,hostname) VALUES($1,$2,$3)",
+        [id("dom"),serviceId,parsed.data.domain.toLowerCase()]
+      );
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  await audit(req.userId ?? "unknown","service.create","service",serviceId,{
+    projectId,
+    name:parsed.data.name,
+    kind:parsed.data.kind,
+    repo:parsed.data.repoFullName
+  });
+  res.status(201).json({ id:serviceId, projectId });
+});
+
+app.delete("/api/services/:id", auth, async (req: AuthedRequest, res) => {
+  const serviceId = String(req.params.id);
+  const service = await one<any>("SELECT * FROM services WHERE id=$1", [serviceId]);
+  if (!service) return res.status(404).json({ error: "service not found" });
+
+  const [databaseCount, volumeCount] = await Promise.all([
+    one<{count:string}>("SELECT count(*)::text count FROM database_resources WHERE service_id=$1", [serviceId]),
+    one<{count:string}>("SELECT count(*)::text count FROM volumes WHERE service_id=$1", [serviceId])
+  ]);
+  const databases = Number(databaseCount?.count ?? 0);
+  const volumes = Number(volumeCount?.count ?? 0);
+  if (databases > 0 || volumes > 0) {
+    return res.status(409).json({
+      error:"service contains stateful resources; remove/detach managed databases and persistent volumes before deleting the service",
+      databases,
+      volumes
+    });
+  }
+
+  const active = await one<any>(`
+    SELECT server_id FROM deployments
+    WHERE service_id=$1 AND server_id IS NOT NULL
+    ORDER BY created_at DESC LIMIT 1
+  `, [serviceId]);
+
+  let commandId: string | null = null;
+  if (active?.server_id) {
+    commandId = await enqueueAgentCommand(active.server_id,"STOP",{
+      serviceId,
+      serviceCleanup:true
+    });
+  }
+
+  await pool.query("DELETE FROM services WHERE id=$1", [serviceId]);
+  await audit(req.userId ?? "unknown","service.delete","service",serviceId,{
+    projectId:service.project_id,
+    name:service.name,
+    commandQueued:Boolean(commandId)
+  });
+  res.json({
+    ok:true,
+    commandId,
+    projectId:service.project_id,
+    note:"Stateless service deleted; any running container is queued for removal."
+  });
+});
+
 app.get("/api/projects/:id", auth, async (req, res) => {
   const project = await one<any>("SELECT * FROM projects WHERE id=$1", [String(req.params.id)]);
   if (!project) return res.status(404).json({ error: "not found" });
