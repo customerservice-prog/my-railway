@@ -12,6 +12,11 @@ test("data-action button groups use querySelectorAll helper", () => {
     "data-drain-server",
     "data-db-backup",
     "data-delete-db",
+    "data-verify-domain",
+    "data-delete-domain",
+    "data-project-db-backup",
+    "data-project-db-delete",
+    "data-cron-log",
     "data-test-backup"
   ];
   for (const name of actionGroups) {
