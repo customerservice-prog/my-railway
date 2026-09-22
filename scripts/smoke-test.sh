@@ -112,22 +112,22 @@ TOTP_SECRET="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(f
 TOTP_CODE="$(node --input-type=module -e 'import { authenticator } from "otplib"; process.stdout.write(authenticator.generate(process.argv[1]))' "$TOTP_SECRET")"
 
 checkpoint "TOTP confirmation"
-STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/totp-confirm.json -w '%{http_code}'   -H 'content-type: application/json'   -d "{"token":"$TOTP_CODE"}"   http://127.0.0.1:8080/api/auth/totp/confirm)"
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/totp-confirm.json -w '%{http_code}'   -H 'content-type: application/json'   -d "$(printf '{"token":"%s"}' "$TOTP_CODE")"   http://127.0.0.1:8080/api/auth/totp/confirm)"
 expect_status "$STATUS" "200" "TOTP confirmation" /tmp/totp-confirm.json
 RECOVERY_CODE="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/totp-confirm.json","utf8")).recoveryCodes[0])')"
 
 # A recovery code authenticates exactly once.
 checkpoint "one-time recovery login"
-STATUS="$(curl -sS -c /tmp/cookies-recovery.txt -o /tmp/login-recovery.json -w '%{http_code}'   -H 'content-type: application/json'   -d "{"email":"ci@example.com","password":"ci-password-123456","recoveryCode":"$RECOVERY_CODE"}"   http://127.0.0.1:8080/api/auth/login)"
+STATUS="$(curl -sS -c /tmp/cookies-recovery.txt -o /tmp/login-recovery.json -w '%{http_code}'   -H 'content-type: application/json'   -d "$(printf '{"email":"ci@example.com","password":"ci-password-123456","recoveryCode":"%s"}' "$RECOVERY_CODE")"   http://127.0.0.1:8080/api/auth/login)"
 expect_status "$STATUS" "200" "recovery-code login" /tmp/login-recovery.json
 
-STATUS="$(curl -sS -o /tmp/login-recovery-reuse.json -w '%{http_code}'   -H 'content-type: application/json'   -d "{"email":"ci@example.com","password":"ci-password-123456","recoveryCode":"$RECOVERY_CODE"}"   http://127.0.0.1:8080/api/auth/login)"
+STATUS="$(curl -sS -o /tmp/login-recovery-reuse.json -w '%{http_code}'   -H 'content-type: application/json'   -d "$(printf '{"email":"ci@example.com","password":"ci-password-123456","recoveryCode":"%s"}' "$RECOVERY_CODE")"   http://127.0.0.1:8080/api/auth/login)"
 expect_status "$STATUS" "401" "recovery code cannot be reused" /tmp/login-recovery-reuse.json
 
 # Revoking sessions invalidates every older cookie while reissuing this verified session.
 TOTP_CODE="$(node --input-type=module -e 'import { authenticator } from "otplib"; process.stdout.write(authenticator.generate(process.argv[1]))' "$TOTP_SECRET")"
 checkpoint "session revocation"
-STATUS="$(curl -sS -b /tmp/cookies.txt -c /tmp/cookies.txt -o /tmp/revoke.json -w '%{http_code}'   -H 'content-type: application/json'   -d "{"password":"ci-password-123456","totp":"$TOTP_CODE"}"   http://127.0.0.1:8080/api/auth/sessions/revoke)"
+STATUS="$(curl -sS -b /tmp/cookies.txt -c /tmp/cookies.txt -o /tmp/revoke.json -w '%{http_code}'   -H 'content-type: application/json'   -d "$(printf '{"password":"ci-password-123456","totp":"%s"}' "$TOTP_CODE")"   http://127.0.0.1:8080/api/auth/sessions/revoke)"
 expect_status "$STATUS" "200" "session revocation" /tmp/revoke.json
 
 STATUS="$(curl -sS -b /tmp/cookies-old.txt -o /tmp/old-session.json -w '%{http_code}' http://127.0.0.1:8080/api/overview)"
