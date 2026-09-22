@@ -71,13 +71,15 @@ export async function setServiceMaintenance(
   }
 
   await docker(["rm","-f",name]).catch(()=>{});
-  const responderScript=[
-    "const http=require('http');",
-    "const escape=(s)=>String(s).replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\\"':'&quot;',\"'\":'&#39;'}[c]));",
-    "const msg=escape(process.env.MAINTENANCE_MESSAGE||'We are performing scheduled maintenance. Please try again shortly.');",
-    "const html='<!doctype html><html><head><meta charset=\\"utf-8\\"><meta name=\\"viewport\\" content=\\"width=device-width,initial-scale=1\\"><title>Maintenance</title><style>body{margin:0;background:#0a0b0d;color:#f5f7fb;font:16px system-ui;display:grid;place-items:center;min-height:100vh}.card{max-width:640px;padding:40px;border:1px solid #2b2f37;border-radius:16px;background:#111318;text-align:center}h1{margin-top:0;font-size:32px}p{color:#b5bdc9;line-height:1.6}</style></head><body><main class=\\"card\\"><h1>Maintenance</h1><p>'+msg+'</p></main></body></html>';",
-    "http.createServer((req,res)=>{res.writeHead(503,{'content-type':'text/html; charset=utf-8','cache-control':'no-store','retry-after':'300'});res.end(html)}).listen(3000,'0.0.0.0');"
-  ].join("");
+  const escapedMessage = String(message)
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;")
+    .replaceAll('"',"&quot;")
+    .replaceAll("'","&#39;");
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Maintenance</title><style>body{margin:0;background:#0a0b0d;color:#f5f7fb;font:16px system-ui;display:grid;place-items:center;min-height:100vh}.card{max-width:640px;padding:40px;border:1px solid #2b2f37;border-radius:16px;background:#111318;text-align:center}h1{margin-top:0;font-size:32px}p{color:#b5bdc9;line-height:1.6}</style></head><body><main class="card"><h1>Maintenance</h1><p>${escapedMessage}</p></main></body></html>`;
+  const htmlB64 = Buffer.from(html,"utf8").toString("base64");
+  const responderScript = "const http=require('http');const html=Buffer.from(process.env.MAINTENANCE_HTML_B64||'', 'base64');http.createServer((req,res)=>{res.writeHead(503,{'content-type':'text/html; charset=utf-8','cache-control':'no-store','retry-after':'300'});res.end(html)}).listen(3000,'0.0.0.0');";
 
   await docker([
     "run","-d",
@@ -88,7 +90,7 @@ export async function setServiceMaintenance(
     "--memory","128m",
     "--pids-limit","64",
     "--label",`myrailway.maintenance.service=${serviceId}`,
-    "-e",`MAINTENANCE_MESSAGE=${message}`,
+    "-e",`MAINTENANCE_HTML_B64=${htmlB64}`,
     "my-railway:local",
     "node","-e",responderScript
   ]);
