@@ -319,3 +319,33 @@ These are intentionally **not** required for private v1, but are mandatory befor
 - [ ] support/recovery process
 - [ ] data-retention policy
 - [ ] legal/privacy/security review
+
+
+## Cron jobs
+
+- [ ] Create a cron service with a disposable test repository.
+- [ ] Invalid cron expression is rejected.
+- [ ] IANA timezone is accepted.
+- [ ] Publish a cron release.
+- [ ] Next scheduled run appears.
+- [ ] Manual Run now completes.
+- [ ] Exit code is recorded.
+- [ ] Logs are recorded and secrets are redacted.
+- [ ] Timeout produces a failed run.
+- [ ] Non-zero exit code produces a failed run.
+- [ ] Failed run creates an alert.
+- [ ] Later successful run resolves the cron alert.
+- [ ] Persistent volumes are available inside the cron job when configured.
+- [ ] Repeated scheduler sweeps do not duplicate the same scheduled timestamp.
+
+
+## Operator controls
+
+- [ ] Queued deployment can be cancelled.
+- [ ] Active deployment cannot be falsely reported as safely cancelled.
+- [ ] Runtime server can be drained.
+- [ ] Drained server receives no new deployments/database placement/self-tests.
+- [ ] Runtime can be resumed.
+- [ ] Removing a domain removes it from the live route without requiring a full redeploy.
+- [ ] Managed database can be removed while retaining data.
+- [ ] Managed database data volume is deleted only with explicit destructive confirmation.
