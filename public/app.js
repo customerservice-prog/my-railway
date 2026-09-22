@@ -381,8 +381,8 @@ async function renderDatabases() {
       <td class="mono">${esc(database.docker_name)}</td>
       <td class="mono">${esc(database.variable_key)}</td>
       <td>
-        <button data-db-backup="${esc(database.id)}">Backup now</button>
-        <button data-delete-db="${esc(database.id)}">Remove</button>
+        ${["detached","delete_failed","failed"].includes(database.status) ? `<button data-db-reattach="${esc(database.id)}">Reattach</button>` : `<button data-db-backup="${esc(database.id)}">Backup now</button>`}
+        <button data-delete-db="${esc(database.id)}">${database.status === "detached" ? "Delete data" : "Remove"}</button>
       </td>
     </tr>
   `).join("");
@@ -392,7 +392,16 @@ async function renderDatabases() {
       <tbody>${body || '<tr><td colspan="7" class="empty">No managed databases yet. Add one from a project.</td></tr>'}</tbody>
     </table></div>
   `;
-  $$("[data-db-backup]").forEach((button) => button.onclick = async () => {
+  $("[data-db-reattach]").forEach((button) => button.onclick = async () => {
+    try {
+      const queued = await api(`/api/databases/${button.dataset.dbReattach}/reattach`, { method:"POST" });
+      if (queued.commandId) await pollCommand(queued.commandId, 15 * 60_000);
+      alert(queued.note || "Database reattached.");
+      renderDatabases();
+    } catch (error) { alert(error.message); }
+  });
+
+  $("[data-db-backup]").forEach((button) => button.onclick = async () => {
     try {
       const queued = await api(`/api/databases/${button.dataset.dbBackup}/backup`, { method: "POST" });
       await pollCommand(queued.commandId, 30 * 60_000);
@@ -662,8 +671,8 @@ async function openProject(id) {
       <span>
         <span class="pill ${statusClass(database.status)}">${esc(database.status)}</span>
         <span class="mono">${esc(database.variable_key)}</span>
-        <button data-project-db-backup="${esc(database.id)}">Backup</button>
-        <button data-project-db-delete="${esc(database.id)}">Remove</button>
+        ${["detached","delete_failed","failed"].includes(database.status) ? `<button data-project-db-reattach="${esc(database.id)}">Reattach</button>` : `<button data-project-db-backup="${esc(database.id)}">Backup</button>`}
+        <button data-project-db-delete="${esc(database.id)}">${database.status === "detached" ? "Delete data" : "Remove"}</button>
       </span>
     </div>
   `).join("") || '<div class="muted">No managed databases.</div>';
@@ -941,7 +950,16 @@ async function openProject(id) {
     } catch (error) { alert(error.message); }
   };
 
-  $$("[data-project-db-backup]", dialog).forEach((button) => button.onclick = async () => {
+  $("[data-project-db-reattach]", dialog).forEach((button) => button.onclick = async () => {
+    try {
+      const queued = await api(`/api/databases/${button.dataset.projectDbReattach}/reattach`, { method:"POST" });
+      if (queued.commandId) await pollCommand(queued.commandId, 15 * 60_000);
+      alert(queued.note || "Database reattached.");
+      openProject(id);
+    } catch (error) { alert(error.message); }
+  });
+
+  $("[data-project-db-backup]", dialog).forEach((button) => button.onclick = async () => {
     try {
       const queued = await api(`/api/databases/${button.dataset.projectDbBackup}/backup`, { method: "POST" });
       await pollCommand(queued.commandId, 30 * 60_000);
