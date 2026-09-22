@@ -507,9 +507,11 @@ wait_command "$DATABASE_COMMAND" "managed PostgreSQL provision"
 
 curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/databases > /tmp/databases.json
 POSTGRES_DOCKER_NAME="$(node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/databases.json","utf8")).find(d=>d.id===id);if(!x||x.status!=="running")process.exit(1);process.stdout.write(x.docker_name)' "$POSTGRES_RESOURCE_ID")"
+POSTGRES_USERNAME="$(node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/databases.json","utf8")).find(d=>d.id===id);process.stdout.write(x.username)' "$POSTGRES_RESOURCE_ID")"
+POSTGRES_DATABASE_NAME="$(node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/databases.json","utf8")).find(d=>d.id===id);process.stdout.write(x.database_name)' "$POSTGRES_RESOURCE_ID")"
 
-docker exec "$POSTGRES_DOCKER_NAME" sh -lc "PGPASSWORD=\"\$POSTGRES_PASSWORD\" psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -v ON_ERROR_STOP=1 -c \"CREATE TABLE restore_probe(value text NOT NULL); INSERT INTO restore_probe(value) VALUES ('before');\" >/dev/null"
-docker exec "$POSTGRES_DOCKER_NAME" sh -lc "test \"\$(PGPASSWORD=\\"\$POSTGRES_PASSWORD\\" psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -Atqc \"SELECT value FROM restore_probe LIMIT 1\")\" = before"
+docker exec "$POSTGRES_DOCKER_NAME" psql -U "$POSTGRES_USERNAME" -d "$POSTGRES_DATABASE_NAME" -v ON_ERROR_STOP=1 -c "CREATE TABLE restore_probe(value text NOT NULL); INSERT INTO restore_probe(value) VALUES ('before');" >/dev/null
+test "$(docker exec "$POSTGRES_DOCKER_NAME" psql -U "$POSTGRES_USERNAME" -d "$POSTGRES_DATABASE_NAME" -Atqc "SELECT value FROM restore_probe LIMIT 1")" = before
 
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/postgres-backup.json -w '%{http_code}'   -H 'content-type: application/json' -d '{}'   "http://127.0.0.1:8080/api/databases/$POSTGRES_RESOURCE_ID/backup")"
 expect_status "$STATUS" "202" "queue PostgreSQL backup" /tmp/postgres-backup.json
@@ -522,14 +524,14 @@ expect_status "$STATUS" "202" "queue PostgreSQL backup validation" /tmp/postgres
 DATABASE_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/postgres-backup-test.json","utf8")).commandId)')"
 wait_command "$DATABASE_COMMAND" "PostgreSQL backup validation"
 
-docker exec "$POSTGRES_DOCKER_NAME" sh -lc "PGPASSWORD=\"\$POSTGRES_PASSWORD\" psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -v ON_ERROR_STOP=1 -c \"UPDATE restore_probe SET value='after';\" >/dev/null"
-docker exec "$POSTGRES_DOCKER_NAME" sh -lc "test \"\$(PGPASSWORD=\\"\$POSTGRES_PASSWORD\\" psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -Atqc \"SELECT value FROM restore_probe LIMIT 1\")\" = after"
+docker exec "$POSTGRES_DOCKER_NAME" psql -U "$POSTGRES_USERNAME" -d "$POSTGRES_DATABASE_NAME" -v ON_ERROR_STOP=1 -c "UPDATE restore_probe SET value='after';" >/dev/null
+test "$(docker exec "$POSTGRES_DOCKER_NAME" psql -U "$POSTGRES_USERNAME" -d "$POSTGRES_DATABASE_NAME" -Atqc "SELECT value FROM restore_probe LIMIT 1")" = after
 
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/postgres-restore.json -w '%{http_code}'   -H 'content-type: application/json' -d '{"confirm":"RESTORE_DATABASE"}'   "http://127.0.0.1:8080/api/backups/$POSTGRES_BACKUP_ID/restore-database")"
 expect_status "$STATUS" "202" "queue PostgreSQL destructive restore" /tmp/postgres-restore.json
 DATABASE_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/postgres-restore.json","utf8")).commandId)')"
 wait_command "$DATABASE_COMMAND" "PostgreSQL destructive restore"
-docker exec "$POSTGRES_DOCKER_NAME" sh -lc "test \"\$(PGPASSWORD=\\"\$POSTGRES_PASSWORD\\" psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -Atqc \"SELECT value FROM restore_probe LIMIT 1\")\" = before"
+test "$(docker exec "$POSTGRES_DOCKER_NAME" psql -U "$POSTGRES_USERNAME" -d "$POSTGRES_DATABASE_NAME" -Atqc "SELECT value FROM restore_probe LIMIT 1")" = before
 
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/postgres-delete.json -w '%{http_code}'   -X DELETE -H 'content-type: application/json' -d '{"confirm":"DELETE_DATA"}'   "http://127.0.0.1:8080/api/databases/$POSTGRES_RESOURCE_ID")"
 expect_status "$STATUS" "202" "queue PostgreSQL permanent deletion" /tmp/postgres-delete.json
