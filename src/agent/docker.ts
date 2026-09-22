@@ -225,6 +225,7 @@ export async function provisionDatabase(payload: DatabasePayload) {
       "--pids-limit","512",
       "--env-file",envData.file,
       "--label",`myrailway.database=${payload.databaseId}`,
+      "--label",`myrailway.database.kind=${payload.kind}`,
       "-v",`${payload.volumeName}:${payload.kind === "postgres" ? "/var/lib/postgresql/data" : "/data"}`,
       image
     ];
@@ -346,6 +347,57 @@ export async function restoreDatabase(payload: DatabasePayload & {fileName:strin
     await docker(["start",payload.dockerName],2*60_000);
   }
   return {restored:safe};
+}
+
+export type DatabaseHealth = {
+  databaseId: string;
+  dockerName: string;
+  kind: "postgres"|"redis";
+  running: boolean;
+  healthy: boolean;
+  message: string | null;
+};
+
+export async function runtimeDatabaseHealth(): Promise<DatabaseHealth[]> {
+  const out = await docker(["ps","-a","--filter","label=myrailway.database","--format","{{.Names}}"]);
+  const names = out ? out.split("\n").filter(Boolean) : [];
+  const results: DatabaseHealth[] = [];
+  for (const name of names) {
+    try {
+      const raw = await docker(["inspect",name]);
+      const info = JSON.parse(raw)?.[0];
+      const labels = info?.Config?.Labels ?? {};
+      const databaseId = labels["myrailway.database"];
+      if (!databaseId) continue;
+      const image = String(info?.Config?.Image ?? "");
+      const kind = (labels["myrailway.database.kind"] || (image.includes("postgres") ? "postgres" : "redis")) as "postgres"|"redis";
+      const running = Boolean(info?.State?.Running);
+      if (!running) {
+        results.push({databaseId,dockerName:name,kind,running:false,healthy:false,message:info?.State?.Status ?? "not running"});
+        continue;
+      }
+      try {
+        if (kind === "postgres") {
+          await docker(["exec",name,"sh","-lc",'PGPASSWORD="$POSTGRES_PASSWORD" pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'],30_000);
+        } else {
+          const pong = await docker(["exec",name,"sh","-lc",'redis-cli -a "$REDIS_PASSWORD" ping 2>/dev/null'],30_000);
+          if (!pong.includes("PONG")) throw new Error("Redis did not return PONG");
+        }
+        results.push({databaseId,dockerName:name,kind,running:true,healthy:true,message:null});
+      } catch (error) {
+        results.push({databaseId,dockerName:name,kind,running:true,healthy:false,message:error instanceof Error ? error.message : String(error)});
+      }
+    } catch (error) {
+      console.error(`Database health inspection failed for ${name}:`, error);
+    }
+  }
+  return results;
+}
+
+export async function removeDatabase(dockerName: string, volumeName?: string, deleteData=false) {
+  await docker(["rm","-f",dockerName]).catch(()=>{});
+  if (deleteData && volumeName) await docker(["volume","rm","-f",volumeName]).catch(()=>{});
+  return {dockerName,removed:true,dataDeleted:Boolean(deleteData && volumeName)};
 }
 
 export type RuntimeHealth = {
