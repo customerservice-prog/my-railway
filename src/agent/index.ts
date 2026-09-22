@@ -1,6 +1,6 @@
 import { env } from "../shared/env.js";
 import { sleep } from "../shared/util.js";
-import { backupDatabase, backupVolume, deploy, platformSelfTest, provisionDatabase, restartService, restoreDatabase, restoreVolume, runtimeLogs, runtimeServiceHealth, runtimeStats, stopService, testDatabaseBackup, testVolumeBackup, type DatabasePayload, type DeployPayload } from "./docker.js";
+import { backupDatabase, backupVolume, deploy, platformSelfTest, provisionDatabase, removeDatabase, restartService, restoreDatabase, restoreVolume, runtimeDatabaseHealth, runtimeLogs, runtimeServiceHealth, runtimeStats, stopService, testDatabaseBackup, testVolumeBackup, type DatabasePayload, type DeployPayload } from "./docker.js";
 
 const control = env("CONTROL_PLANE_URL", "http://localhost:8080").replace(/\/$/,"");
 const token = env("AGENT_TOKEN");
@@ -20,10 +20,10 @@ async function request(path: string, init: RequestInit = {}) {
 }
 
 async function heartbeat() {
-  const [stats, services] = await Promise.all([runtimeStats(), runtimeServiceHealth()]);
+  const [stats, services, databases] = await Promise.all([runtimeStats(), runtimeServiceHealth(), runtimeDatabaseHealth()]);
   const response = await request("/api/internal/agent/heartbeat", {
     method:"POST",
-    body:JSON.stringify({ id:serverId, name:serverName, agentVersion, ...stats, services })
+    body:JSON.stringify({ id:serverId, name:serverName, agentVersion, ...stats, services, databases })
   });
   if (!response.ok) throw new Error(`heartbeat failed: ${response.status}`);
 }
@@ -60,6 +60,7 @@ async function execute(command: any) {
     case "BACKUP_DATABASE": return backupDatabase(command.payload);
     case "TEST_DATABASE_BACKUP": return testDatabaseBackup(command.payload);
     case "RESTORE_DATABASE": return restoreDatabase(command.payload);
+    case "REMOVE_DATABASE": return removeDatabase(String(command.payload.dockerName), command.payload.volumeName ? String(command.payload.volumeName) : undefined, Boolean(command.payload.deleteData));
     default: throw new Error(`unknown command: ${command.action}`);
   }
 }
