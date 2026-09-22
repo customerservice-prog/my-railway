@@ -643,6 +643,48 @@ async function sendServiceCommand(serviceId: string, action: "STOP"|"RESTART") {
   return commandId;
 }
 
+app.get("/api/commands/:id", auth, async (req, res) => {
+  const command = await one<any>(`
+    SELECT id,server_id,deployment_id,action,status,result,created_at,claimed_at,completed_at
+    FROM agent_commands WHERE id=$1
+  `, [String(req.params.id)]);
+  if (!command) return res.status(404).json({ error: "command not found" });
+  res.json(command);
+});
+
+app.post("/api/services/:id/logs/refresh", auth, async (req: AuthedRequest, res) => {
+  const serviceId = String(req.params.id);
+  const active = await one<any>(`
+    SELECT id,server_id FROM deployments
+    WHERE service_id=$1 AND server_id IS NOT NULL
+    ORDER BY created_at DESC LIMIT 1
+  `, [serviceId]);
+  if (!active?.server_id) return res.status(409).json({ error: "service has never been assigned to a runtime server" });
+  const commandId = id("cmd");
+  await pool.query(
+    "INSERT INTO agent_commands(id,server_id,deployment_id,action,payload) VALUES($1,$2,$3,'FETCH_LOGS',$4)",
+    [commandId, active.server_id, active.id, JSON.stringify({ serviceId })]
+  );
+  await audit(req.userId ?? "unknown", "runtime.logs.refresh", "service", serviceId);
+  res.status(202).json({ commandId, deploymentId: active.id });
+});
+
+app.post("/api/platform/self-test", auth, async (req: AuthedRequest, res) => {
+  const server = await one<any>(`
+    SELECT id,name FROM servers
+    WHERE last_seen_at > now() - interval '45 seconds'
+    ORDER BY load1 ASC NULLS LAST LIMIT 1
+  `);
+  if (!server) return res.status(409).json({ error: "no online runtime server available" });
+  const commandId = id("cmd");
+  await pool.query(
+    "INSERT INTO agent_commands(id,server_id,action,payload) VALUES($1,$2,'SELF_TEST','{}'::jsonb)",
+    [commandId, server.id]
+  );
+  await audit(req.userId ?? "unknown", "platform.self_test", "server", server.id);
+  res.status(202).json({ commandId, server });
+});
+
 app.post("/api/services/:id/stop", auth, async (req: AuthedRequest, res) => {
   const serviceId = String(req.params.id);
   const commandId = await sendServiceCommand(serviceId, "STOP");
@@ -824,6 +866,13 @@ app.post("/api/internal/agent/commands/:id/complete", agentAuth, async (req, res
   }
   if (backupId && command.action === "TEST_VOLUME_BACKUP" && status === "completed") {
     await pool.query("UPDATE backups SET restore_tested_at=now() WHERE id=$1", [backupId]);
+  }
+  if (command.action === "FETCH_LOGS" && command.deployment_id && status === "completed") {
+    const text = String(result.logs ?? "No runtime log output.").slice(-1_000_000);
+    await pool.query(
+      "INSERT INTO deployment_logs(deployment_id,level,message) VALUES($1,'runtime',$2)",
+      [command.deployment_id, `[runtime ${result.containerName ?? "container"}]\n${text}`]
+    );
   }
   res.json({ ok: true });
 });
