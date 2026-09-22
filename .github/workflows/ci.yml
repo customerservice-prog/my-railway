@@ -17,6 +17,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: node --check public/app.js
+      - run: node --check scripts/platform-updater.mjs
       - run: npm test
       - name: Syntax-check every shell script
         run: |
@@ -28,4 +29,5 @@ jobs:
       - run: bash scripts/export-recovery.sh --help
       - run: cp .env.example .env && docker compose config --quiet
       - run: docker build -t my-railway:local .
+      - run: docker build -f Dockerfile.updater -t my-railway-updater:local .
       - run: bash scripts/smoke-test.sh
