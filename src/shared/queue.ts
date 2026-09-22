@@ -1,8 +1,8 @@
-import IORedis from "ioredis";
+import { Redis } from "ioredis";
 import { Queue } from "bullmq";
 import { env } from "./env.js";
 
-export const redis = new IORedis(env("REDIS_URL", "redis://localhost:6379"), {
+export const redis = new Redis(env("REDIS_URL", "redis://localhost:6379"), {
   maxRetriesPerRequest: null,
   enableReadyCheck: true
 });
