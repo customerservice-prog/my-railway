@@ -11,14 +11,36 @@ expect_status() {
       cat "$body_file" >&2 || true
       echo >&2
     fi
-    docker compose logs --tail=120 control >&2 || true
+    docker compose logs --tail=120 control agent >&2 || true
     exit 1
   fi
+}
+
+wait_command() {
+  local command_id="$1" label="$2"
+  for _ in $(seq 1 180); do
+    curl -fsS -b /tmp/cookies.txt "http://127.0.0.1:8080/api/commands/$command_id" > /tmp/command.json
+    local state
+    state="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/command.json","utf8")).status)')"
+    if [ "$state" = "completed" ]; then return 0; fi
+    if [ "$state" = "failed" ]; then
+      echo "Agent command failed during $label" >&2
+      cat /tmp/command.json >&2
+      docker compose logs --tail=160 agent control >&2 || true
+      exit 1
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for agent command during $label" >&2
+  docker compose logs --tail=160 agent control >&2 || true
+  exit 1
 }
 
 cd "$(dirname "$0")/.."
 
 cleanup() {
+  docker ps -aq --filter label=myrailway.database | xargs -r docker rm -f >/dev/null 2>&1 || true
+  docker volume ls -q --filter name=mr-db- | xargs -r docker volume rm -f >/dev/null 2>&1 || true
   docker compose down -v --remove-orphans >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -63,7 +85,11 @@ RESTIC_REPOSITORY=
 RESTIC_PASSWORD=
 EOF
 
-docker compose up -d --no-build postgres redis control
+mkdir -p data/routes
+touch data/acme.json
+chmod 600 data/acme.json
+
+docker compose up -d --no-build postgres redis control agent
 
 for _ in $(seq 1 60); do
   if curl -fsS http://127.0.0.1:8080/healthz >/tmp/myrailway-health.json 2>/dev/null; then break; fi
@@ -136,6 +162,61 @@ expect_status "$STATUS" "200" "session revocation" /tmp/revoke.json
 STATUS="$(curl -sS -b /tmp/cookies-old.txt -o /tmp/old-session.json -w '%{http_code}' http://127.0.0.1:8080/api/overview)"
 expect_status "$STATUS" "401" "old session rejected after revoke" /tmp/old-session.json
 curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/overview >/tmp/current-session.json
+
+checkpoint "runtime agent heartbeat"
+for _ in $(seq 1 60); do
+  curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/servers > /tmp/servers.json
+  if node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/servers.json","utf8"));process.exit(x.some(s=>s.id==="local-runtime-01"&&s.online)?0:1)' 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/servers.json","utf8"));if(!x.some(s=>s.id==="local-runtime-01"&&s.online))process.exit(1)'
+
+checkpoint "platform agent self-test"
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/self-test.json -w '%{http_code}' -H 'content-type: application/json' -d '{}' http://127.0.0.1:8080/api/platform/self-test)"
+expect_status "$STATUS" "202" "queue platform self-test" /tmp/self-test.json
+SELF_TEST_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/self-test.json","utf8")).commandId)')"
+wait_command "$SELF_TEST_COMMAND" "platform self-test"
+node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/command.json","utf8"));if(!x.result?.ok)process.exit(1)'
+
+PROJECT_ID="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/project.json","utf8")).id)')"
+SERVICE_ID="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/project.json","utf8")).serviceId)')"
+
+checkpoint "managed Redis provision"
+node -e 'require("fs").writeFileSync("/tmp/database-create.json",JSON.stringify({kind:"redis",name:"Smoke Redis",serviceId:process.argv[1],variableKey:"SMOKE_REDIS_URL"}))' "$SERVICE_ID"
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/database-create-response.json -w '%{http_code}' -H 'content-type: application/json' --data-binary @/tmp/database-create.json "http://127.0.0.1:8080/api/projects/$PROJECT_ID/databases")"
+expect_status "$STATUS" "202" "queue managed Redis provision" /tmp/database-create-response.json
+DATABASE_ID="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/database-create-response.json","utf8"));process.stdout.write(x.databaseId)')"
+DATABASE_COMMAND="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/database-create-response.json","utf8"));process.stdout.write(x.commandId)')"
+wait_command "$DATABASE_COMMAND" "managed Redis provision"
+curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/databases > /tmp/databases.json
+node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/databases.json","utf8")).find(d=>d.id===id);if(!x||x.status!=="running")process.exit(1)' "$DATABASE_ID"
+
+checkpoint "managed Redis detach with data retained"
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/database-detach.json -w '%{http_code}' -X DELETE -H 'content-type: application/json' -d '{"confirm":"KEEP_DATA"}' "http://127.0.0.1:8080/api/databases/$DATABASE_ID")"
+expect_status "$STATUS" "202" "queue database detach" /tmp/database-detach.json
+DATABASE_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/database-detach.json","utf8")).commandId)')"
+wait_command "$DATABASE_COMMAND" "managed Redis detach"
+curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/databases > /tmp/databases.json
+node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/databases.json","utf8")).find(d=>d.id===id);if(!x||x.status!=="detached")process.exit(1)' "$DATABASE_ID"
+docker volume inspect "$(node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/databases.json","utf8")).find(d=>d.id===id);process.stdout.write(x.volume_name)' "$DATABASE_ID")" >/dev/null
+
+checkpoint "managed Redis reattach"
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/database-reattach.json -w '%{http_code}' -H 'content-type: application/json' -d '{}' "http://127.0.0.1:8080/api/databases/$DATABASE_ID/reattach")"
+expect_status "$STATUS" "202" "queue database reattach" /tmp/database-reattach.json
+DATABASE_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/database-reattach.json","utf8")).commandId)')"
+wait_command "$DATABASE_COMMAND" "managed Redis reattach"
+curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/databases > /tmp/databases.json
+node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/databases.json","utf8")).find(d=>d.id===id);if(!x||x.status!=="running")process.exit(1)' "$DATABASE_ID"
+
+checkpoint "managed Redis permanent deletion"
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/database-delete.json -w '%{http_code}' -X DELETE -H 'content-type: application/json' -d '{"confirm":"DELETE_DATA"}' "http://127.0.0.1:8080/api/databases/$DATABASE_ID")"
+expect_status "$STATUS" "202" "queue permanent database deletion" /tmp/database-delete.json
+DATABASE_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/database-delete.json","utf8")).commandId)')"
+wait_command "$DATABASE_COMMAND" "managed Redis permanent deletion"
+curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/databases > /tmp/databases.json
+node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/databases.json","utf8"));if(x.some(d=>d.id===id))process.exit(1)' "$DATABASE_ID"
 
 STATUS="$(curl -sS -o /tmp/webhook.json -w '%{http_code}'   -H 'content-type: application/json'   -H 'x-github-delivery: ci-invalid'   -H 'x-github-event: push'   -H 'x-hub-signature-256: sha256=invalid'   -d '{"ref":"refs/heads/main"}'   http://127.0.0.1:8080/api/webhooks/github)"
 expect_status "$STATUS" "401" "invalid webhook signature rejected" /tmp/webhook.json
