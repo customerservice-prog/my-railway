@@ -662,6 +662,10 @@ if(x.settings.ALERT_WEBHOOK_URL!=="https://example.invalid/my-railway-ci") proce
 if(x.settings.AUTO_BACKUPS!==false) process.exit(1);
 NODE
 
+# Dashboard-managed host settings must never modify tracked source files; self-update relies on a clean checkout.
+git diff --quiet
+git diff --cached --quiet
+
 checkpoint "stateless project deletion"
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/project-delete.json -w '%{http_code}' -X DELETE "http://127.0.0.1:8080/api/projects/$PROJECT_ID")"
 expect_status "$STATUS" "200" "delete project after stateful resources are removed" /tmp/project-delete.json
