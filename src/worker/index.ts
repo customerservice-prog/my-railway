@@ -5,7 +5,8 @@ import { Worker } from "bullmq";
 import { pool, one, query } from "../shared/db.js";
 import { redis } from "../shared/queue.js";
 import { decryptSecret, encryptSecret } from "../shared/crypto.js";
-import { env, optionalEnv } from "../shared/env.js";
+import { env } from "../shared/env.js";
+import { getGitHubCloneToken, gitHubAuthEnvironment } from "../shared/github.js";
 import { id, safeContainerName, sleep } from "../shared/util.js";
 import { prepareDockerfile, run } from "./build.js";
 
@@ -20,10 +21,8 @@ type Deployment = {
 };
 
 const registry = env("REGISTRY_URL", "local");
-const githubToken = optionalEnv("GITHUB_TOKEN");
-
 async function log(deploymentId: string, message: string, level="info") {
-  const clean = message.replace(githubToken ?? "__NO_TOKEN__", githubToken ? "***" : "__NO_TOKEN__").slice(0, 8000);
+  const clean = message.slice(0, 8000);
   await pool.query("INSERT INTO deployment_logs(deployment_id,level,message) VALUES($1,$2,$3)", [deploymentId, level, clean]);
   console.log(`[${deploymentId}] ${clean}`);
 }
@@ -81,14 +80,15 @@ async function waitForCommand(commandId: string, deploymentId: string): Promise<
 }
 
 async function cloneRepository(dep: Deployment, repoDir: string) {
-  const authPrefix = githubToken ? `x-access-token:${encodeURIComponent(githubToken)}@` : "";
-  const cloneUrl = `https://${authPrefix}github.com/${dep.repo_full_name}.git`;
+  const token = await getGitHubCloneToken();
+  const cloneUrl = `https://github.com/${dep.repo_full_name}.git`;
+  const gitEnv = gitHubAuthEnvironment(token);
   await status(dep.id, "CLONING");
   await log(dep.id, `Cloning ${dep.repo_full_name} @ ${dep.branch}`);
-  await run("git", ["clone","--no-tags","--depth","50","--branch",dep.branch,cloneUrl,repoDir], os.tmpdir(), (line)=>log(dep.id,line));
+  await run("git", ["clone","--no-tags","--depth","50","--branch",dep.branch,cloneUrl,repoDir], os.tmpdir(), (line)=>log(dep.id,line), gitEnv);
   if (dep.commit_sha) {
-    await run("git", ["fetch","--depth","1","origin",dep.commit_sha], repoDir, (line)=>log(dep.id,line));
-    await run("git", ["checkout","--detach",dep.commit_sha], repoDir, (line)=>log(dep.id,line));
+    await run("git", ["fetch","--depth","1","origin",dep.commit_sha], repoDir, (line)=>log(dep.id,line), gitEnv);
+    await run("git", ["checkout","--detach",dep.commit_sha], repoDir, (line)=>log(dep.id,line), gitEnv);
   } else {
     const { execFile } = await import("node:child_process");
     dep.commit_sha = await new Promise<string>((resolve,reject) => execFile("git",["rev-parse","HEAD"],{cwd:repoDir},(err,stdout)=>err?reject(err):resolve(stdout.trim())));
