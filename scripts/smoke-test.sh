@@ -197,6 +197,10 @@ wait_command "$DATABASE_COMMAND" "managed Redis provision"
 curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/databases > /tmp/databases.json
 node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/databases.json","utf8")).find(d=>d.id===id);if(!x||x.status!=="running")process.exit(1)' "$DATABASE_ID"
 
+checkpoint "stateful project deletion guard"
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/project-delete-blocked.json -w '%{http_code}' -X DELETE "http://127.0.0.1:8080/api/projects/$PROJECT_ID")"
+expect_status "$STATUS" "409" "block project deletion while managed database exists" /tmp/project-delete-blocked.json
+
 checkpoint "managed Redis detach with data retained"
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/database-detach.json -w '%{http_code}' -X DELETE -H 'content-type: application/json' -d '{"confirm":"KEEP_DATA"}' "http://127.0.0.1:8080/api/databases/$DATABASE_ID")"
 expect_status "$STATUS" "202" "queue database detach" /tmp/database-detach.json
@@ -221,6 +225,10 @@ DATABASE_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.pa
 wait_command "$DATABASE_COMMAND" "managed Redis permanent deletion"
 curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/databases > /tmp/databases.json
 node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/databases.json","utf8"));if(x.some(d=>d.id===id))process.exit(1)' "$DATABASE_ID"
+
+checkpoint "stateless project deletion"
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/project-delete.json -w '%{http_code}' -X DELETE "http://127.0.0.1:8080/api/projects/$PROJECT_ID")"
+expect_status "$STATUS" "200" "delete project after stateful resources are removed" /tmp/project-delete.json
 
 STATUS="$(curl -sS -o /tmp/webhook.json -w '%{http_code}'   -H 'content-type: application/json'   -H 'x-github-delivery: ci-invalid'   -H 'x-github-event: push'   -H 'x-hub-signature-256: sha256=invalid'   -d '{"ref":"refs/heads/main"}'   http://127.0.0.1:8080/api/webhooks/github)"
 expect_status "$STATUS" "401" "invalid webhook signature rejected" /tmp/webhook.json
