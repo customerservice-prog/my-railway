@@ -179,3 +179,32 @@ docs/PRODUCTION_CHECKLIST.md
 ```
 
 Only after deploy, rollback, backup/restore, host reboot, agent failure, and health-alert drills succeed should you migrate a business-critical application.
+
+
+## Updating from the dashboard
+
+After installation, normal platform upgrades do not require SSH.
+
+Open:
+
+```text
+Platform -> Deploy platform update
+```
+
+The page displays:
+
+- current platform commit
+- configured release channel
+- available release commit
+- update state
+- live updater log
+
+The production channel is configured in `.env`:
+
+```dotenv
+PLATFORM_UPDATE_REF=release/private-v1-rc1
+```
+
+When the release branch advances, the dashboard detects the new commit. The independent updater performs backup, candidate build, health gating, platform replacement, and rollback if activation fails.
+
+The manual `./scripts/upgrade.sh` path remains available as an emergency/fallback operator tool.
