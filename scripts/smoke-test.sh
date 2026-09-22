@@ -16,7 +16,7 @@ expect_status() {
   fi
 }
 
-cd "$(dirname "$0")/..
+cd "$(dirname "$0")/.."
 
 cleanup() {
   docker compose down -v --remove-orphans >/dev/null 2>&1 || true
