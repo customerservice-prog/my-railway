@@ -128,6 +128,26 @@ export async function deploy(payload: DeployPayload) {
   }
 }
 
+export async function refreshServiceRoute(serviceId: string, domains: string[]) {
+  const names = await serviceContainers(serviceId);
+  if (!names.length) {
+    await removeRoute(serviceId);
+    return { routed:false, reason:"no running container" };
+  }
+  const name = names[0]!;
+  const raw = await docker(["inspect",name]);
+  const info = JSON.parse(raw)?.[0];
+  const labels = info?.Config?.Labels ?? {};
+  const port = Number(labels["myrailway.port"] ?? 80);
+  const running = Boolean(info?.State?.Running);
+  if (!running) {
+    await removeRoute(serviceId);
+    return { routed:false, reason:"container not running" };
+  }
+  await activateRoute(serviceId,name,port,domains);
+  return { routed:domains.length>0,containerName:name,port,domains };
+}
+
 export async function stopService(serviceId: string) {
   await removeRoute(serviceId);
   const names = await serviceContainers(serviceId);
