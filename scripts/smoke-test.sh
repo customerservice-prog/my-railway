@@ -472,8 +472,8 @@ node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.r
 checkpoint "managed Redis backup and destructive restore"
 curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/databases > /tmp/databases.json
 REDIS_DOCKER_NAME="$(node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/databases.json","utf8")).find(d=>d.id===id);process.stdout.write(x.docker_name)' "$DATABASE_ID")"
-docker exec "$REDIS_DOCKER_NAME" sh -lc 'redis-cli -a "$REDIS_PASSWORD" SET myrailway_restore_key before >/dev/null'
-docker exec "$REDIS_DOCKER_NAME" sh -lc 'test "$(redis-cli -a "$REDIS_PASSWORD" GET myrailway_restore_key 2>/dev/null)" = before'
+docker exec "$REDIS_DOCKER_NAME" sh -lc 'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli SET myrailway_restore_key before >/dev/null'
+docker exec "$REDIS_DOCKER_NAME" sh -lc 'test "$(REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli GET myrailway_restore_key 2>/dev/null)" = before'
 
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/redis-backup.json -w '%{http_code}'   -H 'content-type: application/json' -d '{}'   "http://127.0.0.1:8080/api/databases/$DATABASE_ID/backup")"
 expect_status "$STATUS" "202" "queue Redis backup" /tmp/redis-backup.json
@@ -486,14 +486,14 @@ expect_status "$STATUS" "202" "queue Redis backup validation" /tmp/redis-backup-
 DATABASE_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/redis-backup-test.json","utf8")).commandId)')"
 wait_command "$DATABASE_COMMAND" "Redis backup validation"
 
-docker exec "$REDIS_DOCKER_NAME" sh -lc 'redis-cli -a "$REDIS_PASSWORD" SET myrailway_restore_key after >/dev/null'
-docker exec "$REDIS_DOCKER_NAME" sh -lc 'test "$(redis-cli -a "$REDIS_PASSWORD" GET myrailway_restore_key 2>/dev/null)" = after'
+docker exec "$REDIS_DOCKER_NAME" sh -lc 'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli SET myrailway_restore_key after >/dev/null'
+docker exec "$REDIS_DOCKER_NAME" sh -lc 'test "$(REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli GET myrailway_restore_key 2>/dev/null)" = after'
 
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/redis-restore.json -w '%{http_code}'   -H 'content-type: application/json' -d '{"confirm":"RESTORE_DATABASE"}'   "http://127.0.0.1:8080/api/backups/$REDIS_BACKUP_ID/restore-database")"
 expect_status "$STATUS" "202" "queue Redis destructive restore" /tmp/redis-restore.json
 DATABASE_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/redis-restore.json","utf8")).commandId)')"
 wait_command "$DATABASE_COMMAND" "Redis destructive restore"
-docker exec "$REDIS_DOCKER_NAME" sh -lc 'test "$(redis-cli -a "$REDIS_PASSWORD" GET myrailway_restore_key 2>/dev/null)" = before'
+docker exec "$REDIS_DOCKER_NAME" sh -lc 'test "$(REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli GET myrailway_restore_key 2>/dev/null)" = before'
 
 checkpoint "stateful project deletion guard"
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/project-delete-blocked.json -w '%{http_code}' -X DELETE "http://127.0.0.1:8080/api/projects/$PROJECT_ID")"
