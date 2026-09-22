@@ -28,3 +28,44 @@ My Railway is private-first. The initial release assumes trusted repositories co
 ## Public SaaS warning
 
 Do not expose this release as a public build platform for arbitrary users. Untrusted builds require substantially stronger isolation, per-tenant authorization, quotas, abuse controls, billing, and network egress policy.
+
+
+## Administrator session security
+
+The administrator session uses a signed HTTP-only SameSite=Strict cookie plus a database-backed session version. Password changes and explicit session revocation increment that version so older cookies immediately stop authorizing requests.
+
+State-changing authenticated browser requests reject cross-site `Origin` / `Sec-Fetch-Site` contexts.
+
+### Two-factor recovery
+
+Enabling TOTP generates ten one-time recovery codes. Only SHA-256 hashes of those high-entropy codes are stored. A recovery code is consumed atomically at login.
+
+Generating a new recovery-code set requires:
+- the current password
+- a valid authenticator code
+
+Old recovery codes become invalid immediately.
+
+## Agent command confidentiality
+
+Sensitive agent command payloads and raw command results are AES-256-GCM encrypted in PostgreSQL. Only redacted/public command summaries remain in normal JSON columns.
+
+Runtime/cron logs are redacted against:
+- configured service secret values
+- attached managed-database passwords
+
+Completed agent commands are deleted according to `COMMAND_RETENTION_DAYS`.
+
+## Retention
+
+Production defaults are intentionally bounded:
+
+- deployment logs: `LOG_RETENTION_DAYS`
+- completed agent commands: `COMMAND_RETENTION_DAYS`
+- webhook deliveries: `WEBHOOK_RETENTION_DAYS`
+- cron run history: `CRON_RUN_RETENTION_DAYS`
+- audit/resolved alerts: `AUDIT_RETENTION_DAYS`
+- local backup files: `BACKUP_RETENTION_DAYS`
+- unused labeled release images: `IMAGE_RETENTION_HOURS`
+
+My Railway release images are labeled at build time so cleanup targets only platform-managed images.
