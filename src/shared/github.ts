@@ -4,13 +4,13 @@ import { optionalEnv } from "./env.js";
 let cached: { token:string; expiresAt:number } | null = null;
 
 export async function getGitHubCloneToken(): Promise<string | undefined> {
-  const staticToken = optionalEnv("GITHUB_TOKEN");
-  if (staticToken) return staticToken;
-
   const appId = optionalEnv("GITHUB_APP_ID");
   const installationId = optionalEnv("GITHUB_APP_INSTALLATION_ID");
   const keyB64 = optionalEnv("GITHUB_APP_PRIVATE_KEY_BASE64");
-  if (!appId || !installationId || !keyB64) return undefined;
+
+  if (!appId || !installationId || !keyB64) {
+    return optionalEnv("GITHUB_TOKEN");
+  }
 
   if (cached && cached.expiresAt > Date.now() + 5 * 60_000) return cached.token;
 
