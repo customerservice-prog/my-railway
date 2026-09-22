@@ -7,6 +7,9 @@ LOG="$ROOT/data/platform-settings.log"
 STATE="$ROOT/data/platform-settings-state.json"
 PREVIOUS_ENV="$ROOT/data/platform-settings-previous.env"
 JOB_ID="${1:-settings}"
+HEALTH_RETRIES="${PLATFORM_SETTINGS_HEALTH_RETRIES:-90}"
+RESTORE_RETRIES="${PLATFORM_SETTINGS_RESTORE_RETRIES:-60}"
+HEALTH_INTERVAL_SECONDS="${PLATFORM_SETTINGS_HEALTH_INTERVAL_SECONDS:-2}"
 cd "$ROOT"
 
 log() {
@@ -52,13 +55,13 @@ fail() {
         traefik control worker agent maintenance platform-backup || true
 
       RESTORED_CONTROL=""
-      for _ in $(seq 1 60); do
+      for _ in $(seq 1 "$RESTORE_RETRIES"); do
         RESTORED_CONTROL="$(docker compose -f "$ROOT/docker-compose.yml" --project-directory "$ROOT" ps -q control 2>/dev/null || true)"
         if [ -n "$RESTORED_CONTROL" ] && docker exec "$RESTORED_CONTROL" curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
           log "Last-known-good control plane is healthy again."
           break
         fi
-        sleep 2
+        sleep "$HEALTH_INTERVAL_SECONDS"
       done
 
       if [ -z "$RESTORED_CONTROL" ] || ! docker exec "$RESTORED_CONTROL" curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
@@ -88,12 +91,12 @@ docker compose -f "$ROOT/docker-compose.yml" --project-directory "$ROOT" up -d -
   traefik control worker agent maintenance platform-backup
 
 CONTROL=""
-for _ in $(seq 1 90); do
+for _ in $(seq 1 "$HEALTH_RETRIES"); do
   CONTROL="$(docker compose -f "$ROOT/docker-compose.yml" --project-directory "$ROOT" ps -q control 2>/dev/null || true)"
   if [ -n "$CONTROL" ] && docker exec "$CONTROL" curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
     break
   fi
-  sleep 2
+  sleep "$HEALTH_INTERVAL_SECONDS"
 done
 
 if [ -z "$CONTROL" ] || ! docker exec "$CONTROL" curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
