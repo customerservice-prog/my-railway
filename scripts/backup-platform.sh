@@ -13,7 +13,17 @@ DB="${DATABASE_NAME:-myrailway}"
 USER="${DATABASE_USER:-myrailway}"
 OUT="$DIR/control-${STAMP}.sql.gz"
 
-pg_dump -h "$HOST" -U "$USER" -d "$DB" --no-owner --no-acl | gzip -9 > "$OUT"
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  DB_CONTAINER="$(docker ps --filter label=com.docker.compose.service=postgres --filter status=running --format '{{.ID}}' | head -n1)"
+  if [ -z "$DB_CONTAINER" ]; then
+    echo "Unable to locate the running PostgreSQL container for a version-matched backup." >&2
+    exit 1
+  fi
+  docker exec -e "PGPASSWORD=$PGPASSWORD" "$DB_CONTAINER" \
+    pg_dump -U "$USER" -d "$DB" --no-owner --no-acl | gzip -9 > "$OUT"
+else
+  pg_dump -h "$HOST" -U "$USER" -d "$DB" --no-owner --no-acl | gzip -9 > "$OUT"
+fi
 sha256sum "$OUT" > "$OUT.sha256"
 
 find "$DIR" -type f -name 'control-*.sql.gz' -mtime "+$RETENTION" -delete
