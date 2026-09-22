@@ -26,6 +26,22 @@ current_enc="$(grep '^SECRET_ENCRYPTION_KEY=' .env | cut -d= -f2- || true)"
 if [ -z "$current_enc" ] || [[ "$current_enc" == replace-* ]]; then replace_env SECRET_ENCRYPTION_KEY "$(openssl rand -base64 32 | tr -d '\n')"; fi
 current_agent="$(grep '^AGENT_TOKEN=' .env | cut -d= -f2- || true)"
 if [ -z "$current_agent" ] || [[ "$current_agent" == replace-* ]]; then replace_env AGENT_TOKEN "$(openssl rand -hex 32)"; fi
+
+current_updater="$(grep '^PLATFORM_UPDATER_TOKEN=' .env | cut -d= -f2- || true)"
+if [ -z "$current_updater" ] || [[ "$current_updater" == replace-* ]]; then
+  replace_env PLATFORM_UPDATER_TOKEN "$(openssl rand -hex 32)"
+fi
+
+current_root="$(grep '^HOST_PROJECT_DIR=' .env | cut -d= -f2- || true)"
+if [ -z "$current_root" ]; then
+  replace_env HOST_PROJECT_DIR "$(pwd)"
+fi
+
+current_update_ref="$(grep '^PLATFORM_UPDATE_REF=' .env | cut -d= -f2- || true)"
+if [ -z "$current_update_ref" ]; then
+  replace_env PLATFORM_UPDATE_REF "release/private-v1-rc1"
+fi
+
 current_pg="$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2- || true)"
 if [ -z "$current_pg" ]; then replace_env POSTGRES_PASSWORD "$(openssl rand -hex 24)"; fi
 
