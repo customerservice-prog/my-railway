@@ -294,6 +294,7 @@ async function runMetadataRetention() {
   const webhookDays = Math.max(1, Number(process.env.WEBHOOK_RETENTION_DAYS ?? 30) || 30);
   const cronDays = Math.max(1, Number(process.env.CRON_RUN_RETENTION_DAYS ?? 90) || 90);
   const auditDays = Math.max(1, Number(process.env.AUDIT_RETENTION_DAYS ?? 365) || 365);
+  const backupDays = Math.max(1, Number(process.env.BACKUP_RETENTION_DAYS ?? 30) || 30);
 
   await Promise.all([
     pool.query(
@@ -319,6 +320,10 @@ async function runMetadataRetention() {
     pool.query(
       "DELETE FROM alerts WHERE resolved_at IS NOT NULL AND resolved_at < now() - ($1::int * interval '1 day')",
       [auditDays]
+    ),
+    pool.query(
+      "DELETE FROM backups WHERE status IN ('completed','failed') AND created_at < now() - ($1::int * interval '1 day')",
+      [backupDays]
     )
   ]);
 }
