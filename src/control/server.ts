@@ -210,6 +210,143 @@ async function runAutomaticBackups() {
   }
 }
 
+async function queueCronRun(service: any, scheduledFor: Date, source: "schedule"|"manual" = "schedule") {
+  const deployment = await one<any>(`
+    SELECT * FROM deployments
+    WHERE service_id=$1 AND status='RUNNING' AND image_ref IS NOT NULL
+    ORDER BY created_at DESC LIMIT 1
+  `, [service.id]);
+
+  const runId = id("crun");
+  const inserted = await pool.query(
+    `INSERT INTO cron_runs(id,service_id,deployment_id,server_id,scheduled_for,status)
+     VALUES($1,$2,$3,$4,$5,'queued')
+     ON CONFLICT(service_id,scheduled_for) DO NOTHING
+     RETURNING *`,
+    [runId,service.id,deployment?.id ?? null,deployment?.server_id ?? null,scheduledFor]
+  );
+  if (!inserted.rowCount) return null;
+
+  if (!deployment?.image_ref || !deployment?.server_id) {
+    await pool.query(
+      "UPDATE cron_runs SET status='failed',completed_at=now(),logs=$2 WHERE id=$1",
+      [runId,"No published cron deployment is available. Deploy the cron service before scheduling runs."]
+    );
+    await openAlert({
+      severity:"warning",
+      type:"cron",
+      fingerprint:`cron:${service.id}`,
+      title:`Cron job cannot run: ${service.name}`,
+      message:"No published cron release is available.",
+      targetType:"service",
+      targetId:service.id
+    });
+    return {runId,commandId:null};
+  }
+
+  const server = await one<any>(
+    "SELECT id,name,draining FROM servers WHERE id=$1 AND last_seen_at > now()-interval '45 seconds'",
+    [deployment.server_id]
+  );
+  if (!server || server.draining) {
+    await pool.query(
+      "UPDATE cron_runs SET status='failed',completed_at=now(),logs=$2 WHERE id=$1",
+      [runId,server?.draining ? "Runtime server is draining." : "Runtime server is offline."]
+    );
+    await openAlert({
+      severity:"critical",
+      type:"cron",
+      fingerprint:`cron:${service.id}`,
+      title:`Cron runtime unavailable: ${service.name}`,
+      message:server?.draining ? "The assigned runtime is draining." : "The assigned runtime is offline.",
+      targetType:"service",
+      targetId:service.id
+    });
+    return {runId,commandId:null};
+  }
+
+  const vars = await query<any>("SELECT key,value_enc FROM variables WHERE service_id=$1", [service.id]);
+  const environment: Record<string,string> = {};
+  for (const variable of vars) environment[variable.key] = decryptSecret(variable.value_enc);
+
+  const volumes = await query<any>(
+    "SELECT docker_volume_name,mount_path,read_only FROM volumes WHERE service_id=$1 ORDER BY created_at",
+    [service.id]
+  );
+
+  const commandId = await enqueueAgentCommand(server.id,"RUN_CRON",{
+    runId,
+    serviceId:service.id,
+    image:deployment.image_ref,
+    command:service.cron_command,
+    cpuLimit:Number(service.cpu_limit),
+    memoryMb:service.memory_mb,
+    timeoutSeconds:service.cron_timeout_seconds ?? 900,
+    environment,
+    volumes:volumes.map((volume:any)=>({
+      name:volume.docker_volume_name,
+      mountPath:volume.mount_path,
+      readOnly:volume.read_only
+    })),
+    source
+  },deployment.id);
+
+  await pool.query(
+    "UPDATE cron_runs SET command_id=$2,started_at=now() WHERE id=$1",
+    [runId,commandId]
+  );
+  await audit(source === "manual" ? "operator" : "system","cron.run.queued","cron_run",runId,{
+    serviceId:service.id,scheduledFor,source
+  });
+  return {runId,commandId};
+}
+
+async function runCronSweep() {
+  const services = await query<any>(`
+    SELECT * FROM services
+    WHERE kind='cron'
+      AND cron_expression IS NOT NULL
+      AND cron_command IS NOT NULL
+      AND next_cron_at IS NOT NULL
+      AND next_cron_at <= now()
+    ORDER BY next_cron_at
+    LIMIT 100
+  `);
+
+  for (const service of services) {
+    try {
+      const scheduledFor = new Date(service.next_cron_at);
+      const nextRun = nextCronAt(
+        service.cron_expression,
+        service.cron_timezone || "UTC",
+        new Date(scheduledFor.getTime() + 1000),
+        service.id
+      );
+
+      const claimed = await pool.query(
+        `UPDATE services SET next_cron_at=$2
+         WHERE id=$1 AND next_cron_at=$3
+         RETURNING id`,
+        [service.id,nextRun,scheduledFor]
+      );
+      if (!claimed.rowCount) continue;
+
+      await queueCronRun(service,scheduledFor,"schedule");
+    } catch (error) {
+      console.error(`Cron scheduling failed for ${service.id}:`,error);
+      await openAlert({
+        severity:"critical",
+        type:"cron_scheduler",
+        fingerprint:`cron-scheduler:${service.id}`,
+        title:`Cron scheduler error: ${service.name}`,
+        message:error instanceof Error ? error.message : String(error),
+        targetType:"service",
+        targetId:service.id
+      });
+    }
+  }
+}
+
 async function createDeployment(
   serviceId: string,
   source: string,
