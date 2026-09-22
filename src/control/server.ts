@@ -1865,6 +1865,240 @@ app.post("/api/services/:id/logs/refresh", auth, async (req: AuthedRequest, res)
   res.status(202).json({ commandId, deploymentId: active.id });
 });
 
+app.get("/api/platform/readiness", auth, async (_req, res) => {
+  type Check = {
+    id: string;
+    title: string;
+    status: "pass"|"warning"|"blocker";
+    message: string;
+  };
+  const checks: Check[] = [];
+  const add = (id:string,title:string,status:Check["status"],message:string) => checks.push({id,title,status,message});
+
+  const user = await one<any>("SELECT email,totp_enabled FROM users ORDER BY created_at LIMIT 1");
+  add(
+    "admin",
+    "Administrator account",
+    user ? "pass" : "blocker",
+    user ? `Administrator exists: ${user.email}` : "Create the first administrator account."
+  );
+  add(
+    "totp",
+    "Two-factor authentication",
+    user?.totp_enabled ? "pass" : "blocker",
+    user?.totp_enabled ? "TOTP is enabled." : "Enable TOTP and store recovery codes before production use."
+  );
+
+  const sessionSecret = optionalEnv("SESSION_SECRET") ?? "";
+  const encryptionKey = optionalEnv("SECRET_ENCRYPTION_KEY") ?? "";
+  const agentSecret = optionalEnv("AGENT_TOKEN") ?? "";
+  const updaterSecret = optionalEnv("PLATFORM_UPDATER_TOKEN") ?? "";
+  const webhookSecret = optionalEnv("GITHUB_WEBHOOK_SECRET") ?? "";
+  let encryptionKeyBytes = 0;
+  try { encryptionKeyBytes = Buffer.from(encryptionKey,"base64").length; } catch {}
+  const coreSecretsOk =
+    sessionSecret.length >= 32 &&
+    encryptionKeyBytes === 32 &&
+    agentSecret.length >= 32 &&
+    updaterSecret.length >= 32 &&
+    webhookSecret.length >= 32 &&
+    webhookSecret !== "replace-me";
+  add(
+    "core-secrets",
+    "Platform secrets",
+    coreSecretsOk ? "pass" : "blocker",
+    coreSecretsOk ? "Core platform secrets are populated." : "One or more required platform secrets are missing, placeholder, or too short."
+  );
+
+  const githubAppConfigured = Boolean(
+    optionalEnv("GITHUB_APP_ID") &&
+    optionalEnv("GITHUB_APP_INSTALLATION_ID") &&
+    optionalEnv("GITHUB_APP_PRIVATE_KEY_BASE64")
+  );
+  const githubPatConfigured = Boolean(optionalEnv("GITHUB_TOKEN"));
+  add(
+    "github-source",
+    "GitHub repository access",
+    githubAppConfigured ? "pass" : githubPatConfigured ? "warning" : "blocker",
+    githubAppConfigured
+      ? "GitHub App credentials are configured."
+      : githubPatConfigured
+        ? "A static GitHub token is configured; GitHub App authentication is preferred."
+        : "Configure a GitHub App (preferred) or a fallback GitHub token."
+  );
+
+  const platformHost = optionalEnv("PLATFORM_HOST") ?? "";
+  const publicIp = optionalEnv("PUBLIC_IP") ?? "";
+  const acmeEmail = optionalEnv("ACME_EMAIL") ?? "";
+  const secureCookie = boolEnv("COOKIE_SECURE", false);
+
+  add(
+    "platform-host",
+    "Public control-plane hostname",
+    platformHost ? "pass" : "blocker",
+    platformHost ? platformHost : "Set PLATFORM_HOST to the HTTPS dashboard hostname."
+  );
+  add(
+    "secure-cookie",
+    "Secure administrator cookie",
+    platformHost && secureCookie ? "pass" : platformHost ? "blocker" : "warning",
+    platformHost && secureCookie
+      ? "COOKIE_SECURE is enabled."
+      : platformHost
+        ? "COOKIE_SECURE must be true on a public HTTPS control plane."
+        : "Secure cookies will be required when a public hostname is configured."
+  );
+  add(
+    "public-ip",
+    "Public application IP",
+    publicIp ? "pass" : "warning",
+    publicIp ? publicIp : "Set PUBLIC_IP to enable application A-record verification."
+  );
+  add(
+    "acme",
+    "ACME / certificate email",
+    acmeEmail && acmeEmail !== "admin@example.com" ? "pass" : "blocker",
+    acmeEmail && acmeEmail !== "admin@example.com"
+      ? acmeEmail
+      : "Set a real ACME_EMAIL for certificate issuance and renewal notices."
+  );
+
+  if (platformHost && publicIp) {
+    try {
+      const addresses = await dns.resolve4(platformHost);
+      add(
+        "control-dns",
+        "Control-plane DNS",
+        addresses.includes(publicIp) ? "pass" : "blocker",
+        addresses.includes(publicIp)
+          ? `${platformHost} resolves to ${publicIp}.`
+          : `${platformHost} resolves to ${addresses.join(", ") || "no IPv4 address"}, expected ${publicIp}.`
+      );
+    } catch (error) {
+      add(
+        "control-dns",
+        "Control-plane DNS",
+        "blocker",
+        `Unable to resolve ${platformHost}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  } else {
+    add("control-dns","Control-plane DNS","warning","Configure PLATFORM_HOST and PUBLIC_IP before DNS can be verified.");
+  }
+
+  const serverCounts = await one<{online:string;draining:string}>(`
+    SELECT
+      count(*) FILTER (WHERE last_seen_at > now() - interval '45 seconds')::text AS online,
+      count(*) FILTER (WHERE draining=true AND last_seen_at > now() - interval '45 seconds')::text AS draining
+    FROM servers
+  `);
+  const onlineServers = Number(serverCounts?.online ?? 0);
+  const drainingServers = Number(serverCounts?.draining ?? 0);
+  add(
+    "runtime",
+    "Runtime agent",
+    onlineServers > 0 ? "pass" : "blocker",
+    onlineServers > 0
+      ? `${onlineServers} runtime server(s) online${drainingServers ? `; ${drainingServers} draining` : ""}.`
+      : "No runtime agent has checked in within 45 seconds."
+  );
+
+  try {
+    const updater = await platformUpdaterRequest("/info");
+    add(
+      "updater",
+      "Independent platform updater",
+      "pass",
+      updater.updateAvailable
+        ? `Updater reachable; release ${String(updater.targetSha ?? "").slice(0,12)} is available.`
+        : "Updater reachable and release channel is accessible."
+    );
+  } catch (error) {
+    add(
+      "updater",
+      "Independent platform updater",
+      "blocker",
+      `Updater unavailable: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  add(
+    "automatic-backups",
+    "Automatic application backups",
+    boolEnv("AUTO_BACKUPS", true) ? "pass" : "warning",
+    boolEnv("AUTO_BACKUPS", true) ? "AUTO_BACKUPS is enabled." : "AUTO_BACKUPS is disabled."
+  );
+  add(
+    "predeploy-backups",
+    "Recovery point before migrations",
+    boolEnv("AUTO_PREDEPLOY_BACKUPS", true) ? "pass" : "blocker",
+    boolEnv("AUTO_PREDEPLOY_BACKUPS", true)
+      ? "Writable volumes and attached managed databases are backed up before migrations."
+      : "AUTO_PREDEPLOY_BACKUPS is disabled; migrations can run without an automatic recovery point."
+  );
+
+  const latestPlatformBackup = await one<{completed_at:string|null;created_at:string|null;status:string}>(`
+    SELECT completed_at,created_at,status
+    FROM backups
+    WHERE kind='platform'
+    ORDER BY created_at DESC
+    LIMIT 1
+  `);
+  if (!latestPlatformBackup) {
+    add("platform-backup","Recent control-plane backup","warning","No platform backup record is present yet.");
+  } else {
+    const backupTime = new Date(latestPlatformBackup.completed_at ?? latestPlatformBackup.created_at ?? 0).getTime();
+    const ageHours = backupTime ? (Date.now()-backupTime)/(60*60*1000) : Number.POSITIVE_INFINITY;
+    add(
+      "platform-backup",
+      "Recent control-plane backup",
+      latestPlatformBackup.status === "completed" && ageHours <= 48 ? "pass" : "warning",
+      latestPlatformBackup.status === "completed"
+        ? `Latest recorded platform backup is approximately ${Math.max(0,Math.round(ageHours))} hour(s) old.`
+        : `Latest platform backup status: ${latestPlatformBackup.status}.`
+    );
+  }
+
+  const resticConfigured = Boolean(optionalEnv("RESTIC_REPOSITORY") && optionalEnv("RESTIC_PASSWORD"));
+  add(
+    "offsite-backup",
+    "Offsite disaster recovery",
+    resticConfigured ? "pass" : "warning",
+    resticConfigured
+      ? "Restic repository and password are configured."
+      : "Configure RESTIC_REPOSITORY and RESTIC_PASSWORD on a different failure domain."
+  );
+
+  const criticalAlerts = await one<{count:string}>(
+    "SELECT count(*)::text count FROM alerts WHERE severity='critical' AND resolved_at IS NULL"
+  );
+  const criticalCount = Number(criticalAlerts?.count ?? 0);
+  add(
+    "critical-alerts",
+    "Open critical alerts",
+    criticalCount === 0 ? "pass" : "blocker",
+    criticalCount === 0 ? "No unresolved critical alerts." : `${criticalCount} unresolved critical alert(s) require attention.`
+  );
+
+  const productionMode = (optionalEnv("NODE_ENV") ?? "production") === "production";
+  add(
+    "production-mode",
+    "Production runtime mode",
+    productionMode ? "pass" : "warning",
+    productionMode ? "NODE_ENV=production." : `NODE_ENV=${optionalEnv("NODE_ENV") ?? "unset"}.`
+  );
+
+  const blockers = checks.filter((check)=>check.status==="blocker").length;
+  const warnings = checks.filter((check)=>check.status==="warning").length;
+  res.json({
+    ready:blockers===0,
+    blockers,
+    warnings,
+    passed:checks.filter((check)=>check.status==="pass").length,
+    checks
+  });
+});
+
 app.get("/api/platform/update/info", auth, async (_req, res) => {
   try {
     res.json(await platformUpdaterRequest("/info"));
