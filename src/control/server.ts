@@ -257,7 +257,7 @@ app.post("/api/projects", auth, async (req: AuthedRequest, res) => {
     kind: z.enum(["web", "worker"]).default("web"),
     buildType: z.enum(["auto", "docker", "node", "python", "static"]).default("auto"),
     internalPort: z.number().int().min(1).max(65535).default(3000),
-    healthPath: z.string().startsWith("/").default("/healthz")
+    healthPath: z.string().startsWith("/").default("/")
   }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
@@ -294,6 +294,7 @@ app.get("/api/projects/:id", auth, async (req, res) => {
   for (const service of services) {
     service.domains = await query("SELECT * FROM domains WHERE service_id=$1 ORDER BY hostname", [service.id]);
     service.variables = await query("SELECT id,key,is_secret,created_at,updated_at FROM variables WHERE service_id=$1 ORDER BY key", [service.id]);
+    service.volumes = await query("SELECT * FROM volumes WHERE service_id=$1 ORDER BY created_at", [service.id]);
     service.deployments = await query("SELECT * FROM deployments WHERE service_id=$1 ORDER BY created_at DESC LIMIT 30", [service.id]);
   }
   res.json({ ...project, services });
@@ -450,7 +451,117 @@ app.get("/api/audit", auth, async (_req, res) => {
 });
 
 app.get("/api/backups", auth, async (_req, res) => {
-  res.json(await query("SELECT * FROM backups ORDER BY created_at DESC LIMIT 200"));
+  res.json(await query(`
+    SELECT b.*, v.name volume_name, p.name project_name, s.name service_name
+    FROM backups b
+    LEFT JOIN volumes v ON v.id=b.volume_id
+    LEFT JOIN services s ON s.id=b.service_id
+    LEFT JOIN projects p ON p.id=s.project_id
+    ORDER BY b.created_at DESC LIMIT 200
+  `));
+});
+
+app.get("/api/services/:id/volumes", auth, async (req, res) => {
+  res.json(await query("SELECT * FROM volumes WHERE service_id=$1 ORDER BY created_at", [String(req.params.id)]));
+});
+
+app.post("/api/services/:id/volumes", auth, async (req: AuthedRequest, res) => {
+  const parsed = z.object({
+    name: z.string().min(1).max(60),
+    mountPath: z.string().startsWith("/").max(250),
+    readOnly: z.boolean().default(false)
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const serviceId = String(req.params.id);
+  const service = await one<any>("SELECT id FROM services WHERE id=$1", [serviceId]);
+  if (!service) return res.status(404).json({ error: "service not found" });
+  const volumeId = id("vol");
+  const dockerName = `mr-${serviceId.slice(-10)}-${slug(parsed.data.name)}`;
+  await pool.query(
+    "INSERT INTO volumes(id,service_id,name,docker_volume_name,mount_path,read_only) VALUES($1,$2,$3,$4,$5,$6)",
+    [volumeId, serviceId, parsed.data.name, dockerName, parsed.data.mountPath, parsed.data.readOnly]
+  );
+  await audit(req.userId ?? "unknown", "volume.attach", "service", serviceId, { name: parsed.data.name, mountPath: parsed.data.mountPath });
+  res.status(201).json({ id: volumeId, dockerVolumeName: dockerName });
+});
+
+app.delete("/api/volumes/:id", auth, async (req: AuthedRequest, res) => {
+  const volume = await one<any>("DELETE FROM volumes WHERE id=$1 RETURNING *", [String(req.params.id)]);
+  if (!volume) return res.status(404).json({ error: "volume not found" });
+  await audit(req.userId ?? "unknown", "volume.detach", "volume", volume.id, { dockerVolumeName: volume.docker_volume_name });
+  res.json({ ok: true, note: "Volume metadata detached; Docker volume data was intentionally left intact." });
+});
+
+app.post("/api/volumes/:id/backup", auth, async (req: AuthedRequest, res) => {
+  const volume = await one<any>(`
+    SELECT v.*, s.id service_id
+    FROM volumes v JOIN services s ON s.id=v.service_id
+    WHERE v.id=$1
+  `, [String(req.params.id)]);
+  if (!volume) return res.status(404).json({ error: "volume not found" });
+  const active = await one<any>(`
+    SELECT server_id FROM deployments
+    WHERE service_id=$1 AND server_id IS NOT NULL AND status='RUNNING'
+    ORDER BY completed_at DESC NULLS LAST, created_at DESC LIMIT 1
+  `, [volume.service_id]);
+  if (!active?.server_id) return res.status(409).json({ error: "no active runtime server for this service" });
+  const backupId = id("bak");
+  const commandId = id("cmd");
+  await pool.query(
+    "INSERT INTO backups(id,service_id,volume_id,server_id,kind,status) VALUES($1,$2,$3,$4,'volume','queued')",
+    [backupId, volume.service_id, volume.id, active.server_id]
+  );
+  await pool.query(
+    "INSERT INTO agent_commands(id,server_id,action,payload) VALUES($1,$2,'BACKUP_VOLUME',$3)",
+    [commandId, active.server_id, JSON.stringify({ volumeName: volume.docker_volume_name, backupName: backupId, backupId })]
+  );
+  await audit(req.userId ?? "unknown", "backup.create", "backup", backupId, { volumeId: volume.id });
+  res.status(202).json({ backupId, commandId });
+});
+
+app.post("/api/backups/:id/test", auth, async (req: AuthedRequest, res) => {
+  const backup = await one<any>("SELECT * FROM backups WHERE id=$1", [String(req.params.id)]);
+  if (!backup || backup.status !== "completed" || !backup.location || !backup.server_id) {
+    return res.status(409).json({ error: "completed backup with a runtime location is required" });
+  }
+  const commandId = id("cmd");
+  await pool.query(
+    "INSERT INTO agent_commands(id,server_id,action,payload) VALUES($1,$2,'TEST_VOLUME_BACKUP',$3)",
+    [commandId, backup.server_id, JSON.stringify({ backupId: backup.id, fileName: path.basename(backup.location) })]
+  );
+  await audit(req.userId ?? "unknown", "backup.test", "backup", backup.id);
+  res.status(202).json({ commandId });
+});
+
+async function sendServiceCommand(serviceId: string, action: "STOP"|"RESTART") {
+  const active = await one<any>(`
+    SELECT server_id FROM deployments
+    WHERE service_id=$1 AND server_id IS NOT NULL
+    ORDER BY created_at DESC LIMIT 1
+  `, [serviceId]);
+  if (!active?.server_id) return null;
+  const commandId = id("cmd");
+  await pool.query(
+    "INSERT INTO agent_commands(id,server_id,action,payload) VALUES($1,$2,$3,$4)",
+    [commandId, active.server_id, action, JSON.stringify({ serviceId })]
+  );
+  return commandId;
+}
+
+app.post("/api/services/:id/stop", auth, async (req: AuthedRequest, res) => {
+  const serviceId = String(req.params.id);
+  const commandId = await sendServiceCommand(serviceId, "STOP");
+  if (!commandId) return res.status(409).json({ error: "service has never been assigned to a runtime server" });
+  await audit(req.userId ?? "unknown", "service.stop", "service", serviceId);
+  res.status(202).json({ commandId });
+});
+
+app.post("/api/services/:id/restart", auth, async (req: AuthedRequest, res) => {
+  const serviceId = String(req.params.id);
+  const commandId = await sendServiceCommand(serviceId, "RESTART");
+  if (!commandId) return res.status(409).json({ error: "service has never been assigned to a runtime server" });
+  await audit(req.userId ?? "unknown", "service.restart", "service", serviceId);
+  res.status(202).json({ commandId });
 });
 
 /* Agent protocol */
@@ -514,15 +625,26 @@ app.post("/api/internal/agent/commands/:id/complete", agentAuth, async (req, res
   const status = req.body?.ok ? "completed" : "failed";
   const result = req.body?.result ?? {};
   const updated = await pool.query(
-    "UPDATE agent_commands SET status=$1,result=$2,completed_at=now() WHERE id=$3 RETURNING deployment_id",
+    "UPDATE agent_commands SET status=$1,result=$2,completed_at=now() WHERE id=$3 RETURNING deployment_id,action,payload",
     [status, JSON.stringify(result), String(req.params.id)]
   );
   if (!updated.rowCount) return res.status(404).json({ error: "command not found" });
+  const command = updated.rows[0];
+  const backupId = command.payload?.backupId;
+  if (backupId && command.action === "BACKUP_VOLUME") {
+    await pool.query(
+      "UPDATE backups SET status=$2, location=$3, size_bytes=$4, completed_at=now() WHERE id=$1",
+      [backupId, status === "completed" ? "completed" : "failed", result.location ?? null, result.sizeBytes ?? null]
+    );
+  }
+  if (backupId && command.action === "TEST_VOLUME_BACKUP" && status === "completed") {
+    await pool.query("UPDATE backups SET restore_tested_at=now() WHERE id=$1", [backupId]);
+  }
   res.json({ ok: true });
 });
 
 app.use(express.static(path.join(process.cwd(), "public"), { maxAge: "1h" }));
-app.get("*", (_req, res) => res.sendFile(path.join(process.cwd(), "public", "index.html")));
+app.use((_req, res) => res.sendFile(path.join(process.cwd(), "public", "index.html")));
 
 async function start() {
   if (boolEnv("AUTO_MIGRATE", true)) await ensureSchema();
