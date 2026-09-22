@@ -19,6 +19,20 @@ const sessionSecret = env("SESSION_SECRET");
 const agentToken = env("AGENT_TOKEN");
 const cookieSecure = boolEnv("COOKIE_SECURE", false);
 
+app.set("trust proxy", 1);
+app.use((_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
+  if (cookieSecure) res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  if (_req.path.startsWith("/api/")) res.setHeader("Cache-Control", "no-store");
+  next();
+});
+
+const loginAttempts = new Map<string,{count:number;resetAt:number}>();
+
 type AuthedRequest = Request & { userId?: string };
 
 function safeUser(user: Record<string, unknown>) {
@@ -106,6 +120,69 @@ async function enqueueAgentCommand(serverId: string, action: string, payload: un
     [commandId,serverId,deploymentId ?? null,action,encryptSecret(JSON.stringify(payload))]
   );
   return commandId;
+}
+
+async function redactServiceSecrets(serviceId: string | undefined, value: string) {
+  if (!serviceId) return value;
+  const vars = await query<{value_enc:string}>("SELECT value_enc FROM variables WHERE service_id=$1", [serviceId]);
+  let redacted=value;
+  const secrets=vars.map((row)=>decryptSecret(row.value_enc)).filter((v)=>v.length>=4).sort((a,b)=>b.length-a.length);
+  for(const secret of secrets) redacted=redacted.split(secret).join("***");
+  return redacted;
+}
+
+async function runAutomaticBackups() {
+  if (!boolEnv("AUTO_BACKUPS", true)) return;
+
+  const databases=await query<any>(`
+    SELECT d.* FROM database_resources d
+    WHERE d.status='running' AND NOT EXISTS (
+      SELECT 1 FROM backups b
+      WHERE b.database_id=d.id AND b.created_at > now()-interval '20 hours' AND b.status IN ('queued','completed')
+    )
+  `);
+  for(const database of databases){
+    try{
+      const backupId=id("bak");
+      await pool.query(
+        "INSERT INTO backups(id,service_id,database_id,server_id,kind,status) VALUES($1,$2,$3,$4,$5,'queued')",
+        [backupId,database.service_id,database.id,database.server_id,`database-${database.kind}`]
+      );
+      await enqueueAgentCommand(database.server_id,"BACKUP_DATABASE",{
+        databaseId:database.id,kind:database.kind,dockerName:database.docker_name,volumeName:database.volume_name,
+        username:database.username,password:decryptSecret(database.password_enc),databaseName:database.database_name,
+        backupId,backupName:backupId
+      });
+      await audit("system","backup.scheduled","database",database.id,{backupId});
+    }catch(error){console.error("Scheduled database backup failed to queue:",error);}
+  }
+
+  const volumes=await query<any>(`
+    SELECT v.* FROM volumes v
+    WHERE NOT EXISTS (
+      SELECT 1 FROM backups b
+      WHERE b.volume_id=v.id AND b.created_at > now()-interval '20 hours' AND b.status IN ('queued','completed')
+    )
+  `);
+  for(const volume of volumes){
+    try{
+      const active=await one<any>(`
+        SELECT server_id FROM deployments
+        WHERE service_id=$1 AND server_id IS NOT NULL AND status='RUNNING'
+        ORDER BY created_at DESC LIMIT 1
+      `,[volume.service_id]);
+      if(!active?.server_id) continue;
+      const backupId=id("bak");
+      await pool.query(
+        "INSERT INTO backups(id,service_id,volume_id,server_id,kind,status) VALUES($1,$2,$3,$4,'volume','queued')",
+        [backupId,volume.service_id,volume.id,active.server_id]
+      );
+      await enqueueAgentCommand(active.server_id,"BACKUP_VOLUME",{
+        volumeName:volume.docker_volume_name,backupName:backupId,backupId
+      });
+      await audit("system","backup.scheduled","volume",volume.id,{backupId});
+    }catch(error){console.error("Scheduled volume backup failed to queue:",error);}
+  }
 }
 
 async function createDeployment(
@@ -213,6 +290,15 @@ app.post("/api/auth/bootstrap", async (req, res) => {
 });
 
 app.post("/api/auth/login", async (req, res) => {
+  const loginKey = req.ip || req.socket.remoteAddress || "unknown";
+  const now = Date.now();
+  const attempt = loginAttempts.get(loginKey);
+  if (attempt && attempt.resetAt > now && attempt.count >= 10) {
+    res.setHeader("Retry-After", String(Math.ceil((attempt.resetAt-now)/1000)));
+    return res.status(429).json({ error: "too many login attempts; try again later" });
+  }
+  if (attempt && attempt.resetAt <= now) loginAttempts.delete(loginKey);
+
   const parsed = z.object({
     email: z.string().email(),
     password: z.string(),
@@ -221,6 +307,11 @@ app.post("/api/auth/login", async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: "invalid credentials" });
   const user = await one<any>("SELECT * FROM users WHERE email=$1", [parsed.data.email.toLowerCase()]);
   if (!user || !(await bcrypt.compare(parsed.data.password, user.password_hash))) {
+    const current = loginAttempts.get(loginKey);
+    loginAttempts.set(loginKey, {
+      count:(current?.count ?? 0)+1,
+      resetAt:current?.resetAt && current.resetAt > now ? current.resetAt : now + 15*60_000
+    });
     return res.status(401).json({ error: "invalid credentials" });
   }
   if (user.totp_enabled) {
@@ -228,6 +319,7 @@ app.post("/api/auth/login", async (req, res) => {
     const secret = decryptSecret(user.totp_secret_enc);
     if (!authenticator.check(parsed.data.totp, secret)) return res.status(401).json({ error: "invalid totp", totpRequired: true });
   }
+  loginAttempts.delete(loginKey);
   await pool.query("UPDATE users SET last_login_at=now() WHERE id=$1", [user.id]);
   res.cookie("mr_session", signSession(user.id), {
     httpOnly: true,
@@ -1006,6 +1098,15 @@ app.post("/api/internal/agent/commands/:id/complete", agentAuth, async (req, res
       "UPDATE backups SET status=$2, location=$3, size_bytes=$4, completed_at=now() WHERE id=$1",
       [backupId, status === "completed" ? "completed" : "failed", result.location ?? null, result.sizeBytes ?? null]
     );
+    if(status==="failed"){
+      await openAlert({
+        severity:"critical",type:"backup",fingerprint:`backup:${backupId}`,
+        title:"Backup failed",message:String(result.error ?? "The runtime agent could not create the backup."),
+        targetType:"backup",targetId:backupId
+      });
+    }else{
+      await resolveAlert(`backup:${backupId}`);
+    }
   }
   if (backupId && ["TEST_VOLUME_BACKUP","TEST_DATABASE_BACKUP"].includes(command.action) && status === "completed") {
     await pool.query("UPDATE backups SET restore_tested_at=now() WHERE id=$1", [backupId]);
@@ -1017,7 +1118,7 @@ app.post("/api/internal/agent/commands/:id/complete", agentAuth, async (req, res
     );
   }
   if (command.action === "FETCH_LOGS" && command.deployment_id && status === "completed") {
-    const text = String(result.logs ?? "No runtime log output.").slice(-1_000_000);
+    const text = await redactServiceSecrets(commandPayload?.serviceId, String(result.logs ?? "No runtime log output.").slice(-1_000_000));
     await pool.query(
       "INSERT INTO deployment_logs(deployment_id,level,message) VALUES($1,'runtime',$2)",
       [command.deployment_id, `[runtime ${result.containerName ?? "container"}]\n${text}`]
@@ -1041,6 +1142,11 @@ async function start() {
     }
   }
   app.listen(port, "0.0.0.0", () => console.log(`My Railway control plane listening on :${port}`));
+
+  if (boolEnv("AUTO_BACKUPS", true)) {
+    setTimeout(() => void runAutomaticBackups().catch((error)=>console.error("Automatic backup sweep failed:",error)), 60_000).unref();
+    setInterval(() => void runAutomaticBackups().catch((error)=>console.error("Automatic backup sweep failed:",error)), 60*60_000).unref();
+  }
 
   setInterval(async () => {
     try {
