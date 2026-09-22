@@ -868,6 +868,7 @@ async function openProject(id, requestedServiceId = null) {
     <div class="section-head"><h3>Service controls</h3></div>
     <div class="row">
       <button class="primary" id="deploy-now">${service.kind === "cron" ? "Publish cron release" : "Deploy now"}</button>
+      <button id="deploy-exact-commit">${service.kind === "cron" ? "Publish exact commit" : "Deploy exact commit"}</button>
       ${service.kind === "cron" ? "" : '<button id="restart-service">Restart</button><button id="refresh-runtime-logs">Refresh live logs</button><button id="stop-service" class="danger">Stop</button>'}
       ${service.kind === "web" ? `<button id="maintenance-toggle">${service.maintenance_enabled ? "Disable maintenance" : "Enable maintenance"}</button>` : ""}
       ${project.services.length > 1 ? '<button id="delete-service" class="danger">Delete service</button>' : ""}
@@ -1030,9 +1031,27 @@ async function openProject(id, requestedServiceId = null) {
 
   $("#deploy-now").onclick = async () => {
     try {
-      await api(`/api/services/${service.id}/deploy`, { method: "POST" });
+      await api(`/api/services/${service.id}/deploy`, { method: "POST", body:"{}" });
       dialog.close();
       state.view = "deployments";
+      await renderDeployments();
+    } catch (error) { alert(error.message); }
+  };
+
+  $("#deploy-exact-commit").onclick = async () => {
+    const commitSha = prompt("Enter the full 40-character Git commit SHA to deploy:");
+    if (!commitSha) return;
+    if (!/^[0-9a-f]{40}$/i.test(commitSha.trim())) {
+      alert("A full 40-character Git commit SHA is required.");
+      return;
+    }
+    try {
+      await api(`/api/services/${service.id}/deploy`, {
+        method:"POST",
+        body:JSON.stringify({commitSha:commitSha.trim()})
+      });
+      dialog.close();
+      state.view="deployments";
       await renderDeployments();
     } catch (error) { alert(error.message); }
   };
