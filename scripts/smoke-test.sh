@@ -109,6 +109,10 @@ PLATFORM_HOST=
 DEPLOY_GRACE_SECONDS=1
 DEPLOY_HEALTH_RETRIES=3
 DEPLOY_HEALTH_INTERVAL_MS=500
+GIT_TIMEOUT_SECONDS=180
+BUILD_TIMEOUT_SECONDS=600
+AGENT_COMMAND_TIMEOUT_SECONDS=300
+AUTO_PREDEPLOY_BACKUPS=true
 AUTO_MIGRATE=true
 AUTO_ROLLBACK=false
 AUTO_BACKUPS=false
@@ -241,7 +245,7 @@ expect_status "$STATUS" "201" "create deploy-engine fixture project" /tmp/deploy
 DEPLOY_PROJECT_ID="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/deploy-project.json","utf8"));process.stdout.write(x.id)')"
 DEPLOY_SERVICE_ID="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/deploy-project.json","utf8"));process.stdout.write(x.serviceId)')"
 
-STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/deploy-service-config.json -w '%{http_code}'   -X PATCH -H 'content-type: application/json'   -d '{"rootDirectory":"fixtures/deploy-good","memoryMb":256,"cpuLimit":0.5,"healthPath":"/healthz","autoDeploy":false}'   "http://127.0.0.1:8080/api/services/$DEPLOY_SERVICE_ID")"
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/deploy-service-config.json -w '%{http_code}'   -X PATCH -H 'content-type: application/json'   -d '{"rootDirectory":"fixtures/deploy-good","memoryMb":256,"cpuLimit":0.5,"healthPath":"/healthz","predeployCommand":"node -p 1","autoDeploy":false}'   "http://127.0.0.1:8080/api/services/$DEPLOY_SERVICE_ID")"
 expect_status "$STATUS" "200" "configure deploy-engine fixture service" /tmp/deploy-service-config.json
 
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/deploy-secret.json -w '%{http_code}'   -X PUT -H 'content-type: application/json'   -d '{"value":"encrypted-fixture-secret"}'   "http://127.0.0.1:8080/api/services/$DEPLOY_SERVICE_ID/variables/DEPLOY_FIXTURE_VALUE")"
@@ -282,6 +286,16 @@ SAFE_DEPLOY_SERVICE_ID="$(printf '%s' "$DEPLOY_SERVICE_ID" | tr '_' '-')"
 test -f "data/routes/$SAFE_DEPLOY_SERVICE_ID.yml"
 grep -q 'deploy-smoke.example.com' "data/routes/$SAFE_DEPLOY_SERVICE_ID.yml"
 
+# A normal deploy with a pre-deploy command must create a recovery backup before migration.
+curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/backups > /tmp/predeploy-backups.json
+node - <<'NODE' "$DEPLOY_SERVICE_ID"
+const fs=require("fs");
+const serviceId=process.argv[2];
+const rows=JSON.parse(fs.readFileSync("/tmp/predeploy-backups.json","utf8"));
+const backup=rows.find(x=>x.service_id===serviceId && x.kind==="volume" && x.status==="completed");
+if(!backup || !backup.location || Number(backup.size_bytes||0)<=0) process.exit(1);
+NODE
+
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/deploy-bad-config.json -w '%{http_code}'   -X PATCH -H 'content-type: application/json'   -d '{"rootDirectory":"fixtures/deploy-bad"}'   "http://127.0.0.1:8080/api/services/$DEPLOY_SERVICE_ID")"
 expect_status "$STATUS" "200" "switch fixture source to intentionally unhealthy app" /tmp/deploy-bad-config.json
 
@@ -302,6 +316,11 @@ const rows=JSON.parse(fs.readFileSync("/tmp/deployments-after-bad.json","utf8"))
 if(rows.find(x=>x.id===good)?.status!=="RUNNING") process.exit(1);
 if(rows.find(x=>x.id===bad)?.status!=="DEPLOY_FAILED") process.exit(1);
 NODE
+
+# Make the current migration command intentionally fail. Rollback must ignore it and reuse
+# the retained release image without rerunning migrations.
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/rollback-migration-guard.json -w '%{http_code}'   -X PATCH -H 'content-type: application/json'   -d '{"predeployCommand":"exit 42"}'   "http://127.0.0.1:8080/api/services/$DEPLOY_SERVICE_ID")"
+expect_status "$STATUS" "200" "set failing migration command before rollback" /tmp/rollback-migration-guard.json
 
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/deploy-rollback.json -w '%{http_code}'   -H 'content-type: application/json' -d '{}'   "http://127.0.0.1:8080/api/deployments/$GOOD_DEPLOY_ID/rollback")"
 expect_status "$STATUS" "202" "queue exact-image rollback" /tmp/deploy-rollback.json
