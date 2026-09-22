@@ -7,6 +7,7 @@ const lines = app.split(/\r?\n/);
 
 test("data-action button groups use querySelectorAll helper", () => {
   const actionGroups = [
+    "data-switch-service",
     "data-logs",
     "data-cancel-deploy",
     "data-rollback",
