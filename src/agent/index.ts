@@ -1,6 +1,6 @@
 import { env } from "../shared/env.js";
 import { sleep } from "../shared/util.js";
-import { backupDatabase, backupVolume, deploy, platformSelfTest, provisionDatabase, removeDatabase, restartService, restoreDatabase, restoreVolume, runtimeDatabaseHealth, runtimeLogs, runtimeServiceHealth, runtimeStats, stopService, testDatabaseBackup, testVolumeBackup, type DatabasePayload, type DeployPayload } from "./docker.js";
+import { backupDatabase, backupVolume, deploy, platformSelfTest, provisionDatabase, refreshServiceRoute, removeDatabase, restartService, restoreDatabase, restoreVolume, runtimeDatabaseHealth, runtimeLogs, runtimeServiceHealth, runtimeStats, stopService, testDatabaseBackup, testVolumeBackup, type DatabasePayload, type DeployPayload } from "./docker.js";
 
 const control = env("CONTROL_PLANE_URL", "http://localhost:8080").replace(/\/$/,"");
 const token = env("AGENT_TOKEN");
