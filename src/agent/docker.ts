@@ -69,6 +69,75 @@ export type DeployPayload = {
   volumes?: Array<{name:string;mountPath:string;readOnly?:boolean}>;
 };
 
+export type CronRunPayload = {
+  runId: string;
+  serviceId: string;
+  image: string;
+  command: string;
+  cpuLimit: number;
+  memoryMb: number;
+  timeoutSeconds: number;
+  environment: Record<string,string>;
+  volumes?: Array<{name:string;mountPath:string;readOnly?:boolean}>;
+};
+
+export async function runCronJob(payload: CronRunPayload) {
+  if (!payload.image.startsWith("myrailway/")) {
+    await docker(["pull",payload.image],10*60_000);
+  }
+
+  const envData=await envFile(payload.environment ?? {});
+  const containerName=`mr-cron-${payload.runId.replace(/[^a-zA-Z0-9_.-]/g,"-").slice(-40)}`;
+  const args=[
+    "run","--rm",
+    "--name",containerName,
+    "--network",network,
+    "--cpus",String(payload.cpuLimit || 1),
+    "--memory",`${payload.memoryMb || 512}m`,
+    "--pids-limit","512",
+    "--env-file",envData.file,
+    "--label",`myrailway.service=${payload.serviceId}`,
+    "--label",`myrailway.cronRun=${payload.runId}`
+  ];
+  for(const volume of payload.volumes ?? []){
+    args.push("-v",`${volume.name}:${volume.mountPath}${volume.readOnly ? ":ro" : ""}`);
+  }
+  args.push(payload.image,"sh","-lc",payload.command);
+
+  const { spawn } = await import("node:child_process");
+  let stdout="";
+  let stderr="";
+  let timedOut=false;
+  try{
+    const result=await new Promise<{exitCode:number}>((resolve,reject)=>{
+      const child=spawn("docker",args,{stdio:["ignore","pipe","pipe"]});
+      const timer=setTimeout(()=>{
+        timedOut=true;
+        void docker(["rm","-f",containerName]).catch(()=>{});
+        child.kill("SIGKILL");
+      },Math.max(1,payload.timeoutSeconds || 900)*1000);
+      timer.unref();
+
+      child.stdout.on("data",(chunk)=>{stdout=(stdout+chunk.toString()).slice(-500_000);});
+      child.stderr.on("data",(chunk)=>{stderr=(stderr+chunk.toString()).slice(-500_000);});
+      child.on("error",(error)=>{clearTimeout(timer);reject(error);});
+      child.on("close",(code)=>{
+        clearTimeout(timer);
+        if(timedOut) return resolve({exitCode:124});
+        resolve({exitCode:code ?? 1});
+      });
+    });
+    return {
+      exitCode:result.exitCode,
+      timedOut,
+      logs:(stdout+stderr).slice(-1_000_000)
+    };
+  } finally {
+    await docker(["rm","-f",containerName]).catch(()=>{});
+    await envData.cleanup();
+  }
+}
+
 export async function deploy(payload: DeployPayload) {
   if (!payload.image.startsWith("myrailway/")) {
     await docker(["pull", payload.image], 10 * 60_000);
