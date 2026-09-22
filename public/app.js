@@ -158,7 +158,10 @@ $("#project-form").addEventListener("submit", async (event) => {
   const form = new FormData(event.currentTarget);
   const body = Object.fromEntries(form.entries());
   body.internalPort = Number(body.internalPort);
+  body.cronTimeoutSeconds = Number(body.cronTimeoutSeconds || 900);
   if (!body.domain) delete body.domain;
+  if (!body.cronExpression) delete body.cronExpression;
+  if (!body.cronCommand) delete body.cronCommand;
   try {
     const created = await api("/api/projects", { method: "POST", body: JSON.stringify(body) });
     $("#project-dialog").close();
