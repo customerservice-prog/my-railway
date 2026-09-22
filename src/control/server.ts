@@ -1021,6 +1021,66 @@ app.patch("/api/services/:id", auth, async (req: AuthedRequest, res) => {
   res.json(result.rows[0]);
 });
 
+app.post("/api/services/:id/maintenance", auth, async (req: AuthedRequest, res) => {
+  const serviceId = String(req.params.id);
+  const parsed = z.object({
+    enabled: z.boolean(),
+    message: z.string().min(1).max(1000).optional()
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  const service = await one<any>("SELECT * FROM services WHERE id=$1", [serviceId]);
+  if (!service) return res.status(404).json({ error: "service not found" });
+  if (service.kind !== "web") {
+    return res.status(409).json({ error: "maintenance mode is available only for web services" });
+  }
+
+  const message = parsed.data.message ?? service.maintenance_message ??
+    "We are performing scheduled maintenance. Please try again shortly.";
+
+  await pool.query(
+    "UPDATE services SET maintenance_enabled=$2,maintenance_message=$3,updated_at=now() WHERE id=$1",
+    [serviceId,parsed.data.enabled,message]
+  );
+
+  const active = await one<any>(`
+    SELECT server_id FROM deployments
+    WHERE service_id=$1 AND server_id IS NOT NULL AND status IN ('RUNNING','UNHEALTHY')
+    ORDER BY created_at DESC LIMIT 1
+  `, [serviceId]);
+
+  const domains = await query<{hostname:string}>(
+    "SELECT hostname FROM domains WHERE service_id=$1 AND verified=true ORDER BY hostname",
+    [serviceId]
+  );
+
+  let commandId: string | null = null;
+  if (active?.server_id) {
+    commandId = await enqueueAgentCommand(active.server_id,"MAINTENANCE",{
+      serviceId,
+      enabled:parsed.data.enabled,
+      message,
+      domains:domains.map((domain)=>domain.hostname)
+    });
+  }
+
+  await audit(req.userId ?? "unknown",
+    parsed.data.enabled ? "service.maintenance.enabled" : "service.maintenance.disabled",
+    "service",
+    serviceId,
+    { message,commandQueued:Boolean(commandId) }
+  );
+
+  res.status(commandId ? 202 : 200).json({
+    enabled:parsed.data.enabled,
+    message,
+    commandId,
+    note:commandId
+      ? "Maintenance route change queued."
+      : "Maintenance state saved. It will be honored on the next web deployment."
+  });
+});
+
 app.post("/api/services/:id/deploy", auth, async (req: AuthedRequest, res) => {
   const service = await one<any>("SELECT * FROM services WHERE id=$1", [String(req.params.id)]);
   if (!service) return res.status(404).json({ error: "service not found" });
