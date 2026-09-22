@@ -179,6 +179,77 @@ function validateSetting(key, value) {
   }
 }
 
+function certificateNameMatches(pattern, hostname) {
+  const p=String(pattern || "").toLowerCase();
+  const h=String(hostname || "").toLowerCase();
+  if (p === h) return true;
+  if (!p.startsWith("*.")) return false;
+  const base=p.slice(2);
+  if (!h.endsWith("." + base)) return false;
+  return h.split(".").length === base.split(".").length + 1;
+}
+
+async function certificateInfo(hostname) {
+  const normalized=String(hostname || "").trim().toLowerCase();
+  if (!/^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(normalized)) {
+    throw new Error("hostname is invalid");
+  }
+
+  const acmePath=path.join(root,"data","acme.json");
+  let payload;
+  try {
+    const raw=await fs.readFile(acmePath,"utf8");
+    payload=raw.trim() ? JSON.parse(raw) : {};
+  } catch (error) {
+    return {
+      hostname:normalized,
+      found:false,
+      error:error instanceof Error ? error.message : String(error)
+    };
+  }
+
+  for (const [resolverName,resolver] of Object.entries(payload ?? {})) {
+    const certificates=Array.isArray(resolver?.Certificates) ? resolver.Certificates : [];
+    for (const entry of certificates) {
+      const names=[
+        entry?.domain?.main,
+        ...(Array.isArray(entry?.domain?.sans) ? entry.domain.sans : [])
+      ].filter(Boolean).map(String);
+      if (!names.some((name)=>certificateNameMatches(name,normalized))) continue;
+
+      try {
+        const certBytes=Buffer.from(String(entry.certificate || ""),"base64");
+        const certificate=new crypto.X509Certificate(certBytes);
+        const validFrom=new Date(certificate.validFrom);
+        const validTo=new Date(certificate.validTo);
+        const daysRemaining=Math.floor((validTo.getTime()-Date.now())/(24*60*60*1000));
+        return {
+          hostname:normalized,
+          found:true,
+          resolver:resolverName,
+          names,
+          subject:certificate.subject,
+          issuer:certificate.issuer,
+          validFrom:validFrom.toISOString(),
+          validTo:validTo.toISOString(),
+          daysRemaining,
+          expired:validTo.getTime() <= Date.now()
+        };
+      } catch (error) {
+        return {
+          hostname:normalized,
+          found:true,
+          resolver:resolverName,
+          names,
+          parseError:error instanceof Error ? error.message : String(error)
+        };
+      }
+    }
+  }
+
+  return {hostname:normalized,found:false};
+}
+
 async function platformSettingsView() {
   const { values } = await parseEnvFile();
   const get = (key) => values.get(key) ?? "";
@@ -381,6 +452,15 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (!authorized(req)) return send(res, 401, { error: "invalid updater token" });
+
+    if (req.method === "GET" && url.pathname === "/certificate") {
+      const hostname=String(url.searchParams.get("hostname") || "");
+      try {
+        return send(res,200,await certificateInfo(hostname));
+      } catch (error) {
+        return send(res,400,{error:error instanceof Error ? error.message : String(error)});
+      }
+    }
 
     if (req.method === "GET" && url.pathname === "/settings") {
       return send(res, 200, {
