@@ -208,6 +208,41 @@ async function redactServiceSecrets(serviceId: string | undefined, value: string
   return redacted;
 }
 
+async function runMetadataRetention() {
+  const logDays = Math.max(1, Number(process.env.LOG_RETENTION_DAYS ?? 30) || 30);
+  const commandDays = Math.max(1, Number(process.env.COMMAND_RETENTION_DAYS ?? 7) || 7);
+  const webhookDays = Math.max(1, Number(process.env.WEBHOOK_RETENTION_DAYS ?? 30) || 30);
+  const cronDays = Math.max(1, Number(process.env.CRON_RUN_RETENTION_DAYS ?? 90) || 90);
+  const auditDays = Math.max(1, Number(process.env.AUDIT_RETENTION_DAYS ?? 365) || 365);
+
+  await Promise.all([
+    pool.query(
+      "DELETE FROM deployment_logs WHERE ts < now() - ($1::int * interval '1 day')",
+      [logDays]
+    ),
+    pool.query(
+      "DELETE FROM agent_commands WHERE status IN ('completed','failed') AND completed_at < now() - ($1::int * interval '1 day')",
+      [commandDays]
+    ),
+    pool.query(
+      "DELETE FROM webhook_deliveries WHERE received_at < now() - ($1::int * interval '1 day')",
+      [webhookDays]
+    ),
+    pool.query(
+      "DELETE FROM cron_runs WHERE created_at < now() - ($1::int * interval '1 day')",
+      [cronDays]
+    ),
+    pool.query(
+      "DELETE FROM audit_events WHERE created_at < now() - ($1::int * interval '1 day')",
+      [auditDays]
+    ),
+    pool.query(
+      "DELETE FROM alerts WHERE resolved_at IS NOT NULL AND resolved_at < now() - ($1::int * interval '1 day')",
+      [auditDays]
+    )
+  ]);
+}
+
 async function runAutomaticBackups() {
   if (!boolEnv("AUTO_BACKUPS", true)) return;
 
@@ -1669,6 +1704,9 @@ async function start() {
     setTimeout(() => void runAutomaticBackups().catch((error)=>console.error("Automatic backup sweep failed:",error)), 60_000).unref();
     setInterval(() => void runAutomaticBackups().catch((error)=>console.error("Automatic backup sweep failed:",error)), 60*60_000).unref();
   }
+
+  setTimeout(() => void runMetadataRetention().catch((error)=>console.error("Metadata retention sweep failed:",error)), 90_000).unref();
+  setInterval(() => void runMetadataRetention().catch((error)=>console.error("Metadata retention sweep failed:",error)), 6*60*60_000).unref();
 
   setTimeout(() => void runCronSweep().catch((error)=>console.error("Cron sweep failed:",error)), 5_000).unref();
   setInterval(() => void runCronSweep().catch((error)=>console.error("Cron sweep failed:",error)), 30_000).unref();
