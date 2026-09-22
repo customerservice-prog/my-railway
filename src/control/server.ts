@@ -193,6 +193,29 @@ async function enqueueAgentCommand(serverId: string, action: string, payload: un
   return commandId;
 }
 
+function managedDatabaseConnection(database: any, password: string) {
+  return database.kind === "postgres"
+    ? `postgresql://${encodeURIComponent(database.username)}:${encodeURIComponent(password)}@${database.docker_name}:5432/${encodeURIComponent(database.database_name)}`
+    : `redis://:${encodeURIComponent(password)}@${database.docker_name}:6379/0`;
+}
+
+async function removeManagedConnectionVariable(database: any) {
+  if (!database?.service_id || !database?.variable_key || !database?.password_enc) return;
+  const variable = await one<{value_enc:string}>(
+    "SELECT value_enc FROM variables WHERE service_id=$1 AND key=$2",
+    [database.service_id,database.variable_key]
+  );
+  if (!variable) return;
+  const expected = managedDatabaseConnection(database,decryptSecret(database.password_enc));
+  const current = decryptSecret(variable.value_enc);
+  if (current === expected) {
+    await pool.query(
+      "DELETE FROM variables WHERE service_id=$1 AND key=$2",
+      [database.service_id,database.variable_key]
+    );
+  }
+}
+
 function nextCronAt(expression: string, timezone: string, from: Date, hashSeed?: string): Date {
   const interval = CronExpressionParser.parse(expression, {
     currentDate: from,
@@ -1260,9 +1283,9 @@ app.post("/api/projects/:id/databases", auth, async (req: AuthedRequest, res) =>
   );
 
   if (service) {
-    const connection = parsed.data.kind === "postgres"
-      ? `postgresql://${encodeURIComponent(username!)}:${encodeURIComponent(password)}@${dockerName}:5432/${encodeURIComponent(databaseName!)}`
-      : `redis://:${encodeURIComponent(password)}@${dockerName}:6379/0`;
+    const connection = managedDatabaseConnection({
+      kind:parsed.data.kind,username,docker_name:dockerName,database_name:databaseName
+    },password);
     await pool.query(
       `INSERT INTO variables(id,service_id,key,value_enc,is_secret) VALUES($1,$2,$3,$4,true)
        ON CONFLICT(service_id,key) DO UPDATE SET value_enc=excluded.value_enc,updated_at=now()`,
@@ -1283,14 +1306,60 @@ app.delete("/api/databases/:id", auth, async (req: AuthedRequest, res) => {
   const deleteData = req.body?.confirm === "DELETE_DATA";
   if (database.status === "deleting") return res.status(409).json({error:"database deletion is already in progress"});
   const commandId = await enqueueAgentCommand(database.server_id,"REMOVE_DATABASE",{
-    databaseId:database.id,dockerName:database.docker_name,volumeName:database.volume_name,deleteData
+    databaseId:database.id,dockerName:database.docker_name,volumeName:database.volume_name,
+    deleteData,serviceId:database.service_id
   });
   await pool.query("UPDATE database_resources SET status='deleting',updated_at=now() WHERE id=$1",[database.id]);
   await audit(req.userId ?? "unknown","database.delete.requested","database",database.id,{deleteData,commandId});
   res.status(202).json({
     commandId,
     dataDeleted:deleteData,
-    note:deleteData ? "Database deletion is queued; metadata will be removed after the runtime confirms container and data-volume deletion." : "Database removal is queued; metadata will be removed after the runtime confirms cleanup and the data volume will be retained."
+    note:deleteData ? "Database deletion is queued; metadata will be removed only after the runtime confirms container and data-volume deletion." : "Database detach is queued; the app will be stopped and the encrypted database record plus data volume will be retained for reattachment."
+  });
+});
+
+app.post("/api/databases/:id/reattach", auth, async (req: AuthedRequest, res) => {
+  const database = await one<any>("SELECT * FROM database_resources WHERE id=$1", [String(req.params.id)]);
+  if (!database) return res.status(404).json({ error:"database not found" });
+  if (!["detached","delete_failed","failed"].includes(database.status)) {
+    return res.status(409).json({ error:`database cannot be reattached from status ${database.status}` });
+  }
+
+  const server = await one<any>(
+    "SELECT id,name,draining FROM servers WHERE id=$1 AND last_seen_at > now()-interval '45 seconds'",
+    [database.server_id]
+  );
+  if (!server) return res.status(409).json({ error:"the database's runtime server is offline" });
+  if (server.draining) return res.status(409).json({ error:"the database's runtime server is draining" });
+
+  const password = decryptSecret(database.password_enc);
+  if (database.service_id && database.variable_key) {
+    const connection = managedDatabaseConnection(database,password);
+    await pool.query(
+      `INSERT INTO variables(id,service_id,key,value_enc,is_secret) VALUES($1,$2,$3,$4,true)
+       ON CONFLICT(service_id,key) DO UPDATE SET value_enc=excluded.value_enc,updated_at=now()`,
+      [id("var"),database.service_id,database.variable_key,encryptSecret(connection)]
+    );
+  }
+
+  const commandId = await enqueueAgentCommand(database.server_id,"PROVISION_DATABASE",{
+    databaseId:database.id,
+    kind:database.kind,
+    dockerName:database.docker_name,
+    volumeName:database.volume_name,
+    username:database.username,
+    password,
+    databaseName:database.database_name
+  });
+  await pool.query(
+    "UPDATE database_resources SET status='queued',health_message='Reattach queued',updated_at=now() WHERE id=$1",
+    [database.id]
+  );
+  await resolveAlert(`database-delete:${database.id}`);
+  await audit(req.userId ?? "unknown","database.reattach","database",database.id,{commandId});
+  res.status(202).json({
+    commandId,
+    note:"Database reattach queued. Redeploy the attached application after the database reports running."
   });
 });
 
@@ -1751,25 +1820,46 @@ app.post("/api/internal/agent/commands/:id/complete", agentAuth, async (req, res
   }
 
   if (command.action === "REMOVE_DATABASE" && commandPayload?.databaseId) {
+    const database = await one<any>(
+      "SELECT * FROM database_resources WHERE id=$1",
+      [commandPayload.databaseId]
+    );
+
     if (status === "completed") {
-      const database = await one<any>(
-        "SELECT service_id,variable_key FROM database_resources WHERE id=$1",
-        [commandPayload.databaseId]
-      );
-      if (database?.service_id && database?.variable_key) {
-        await pool.query(
-          "DELETE FROM variables WHERE service_id=$1 AND key=$2",
-          [database.service_id,database.variable_key]
-        );
+      if (database) {
+        await removeManagedConnectionVariable(database);
+        if (database.service_id) {
+          await pool.query(
+            "UPDATE deployments SET status='STOPPED' WHERE service_id=$1 AND status IN ('RUNNING','UNHEALTHY')",
+            [database.service_id]
+          );
+          await pool.query(
+            "UPDATE service_health SET healthy=false,message='Stopped for managed database removal',checked_at=now() WHERE service_id=$1",
+            [database.service_id]
+          );
+          await resolveAlert(`service-unhealthy:${database.service_id}`);
+        }
+
+        if (commandPayload.deleteData) {
+          await pool.query("DELETE FROM database_resources WHERE id=$1", [commandPayload.databaseId]);
+        } else {
+          await pool.query(
+            `UPDATE database_resources
+             SET status='detached',health_message='Container removed; data volume and encrypted credentials retained',
+                 consecutive_failures=0,last_health_at=now(),updated_at=now()
+             WHERE id=$1`,
+            [commandPayload.databaseId]
+          );
+        }
       }
-      await pool.query("DELETE FROM database_resources WHERE id=$1", [commandPayload.databaseId]);
-      await audit("system","database.delete.completed","database",commandPayload.databaseId,{
+      await resolveAlert(`database-delete:${commandPayload.databaseId}`);
+      await audit("system",commandPayload.deleteData ? "database.delete.completed" : "database.detach.completed","database",commandPayload.databaseId,{
         deleteData:Boolean(commandPayload.deleteData)
       });
     } else {
       await pool.query(
-        "UPDATE database_resources SET status='delete_failed',updated_at=now() WHERE id=$1",
-        [commandPayload.databaseId]
+        "UPDATE database_resources SET status='delete_failed',health_message=$2,updated_at=now() WHERE id=$1",
+        [commandPayload.databaseId,String((publicResult as any).error ?? "Runtime database cleanup failed")]
       );
       await openAlert({
         severity:"critical",
