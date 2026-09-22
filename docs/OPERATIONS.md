@@ -504,3 +504,35 @@ Removing a domain from the project screen immediately queues a live route refres
 ## Cancelling deployments
 
 Cancellation is intentionally limited to the QUEUED state. Once deployment work has started, use normal failure/rollback/stop controls rather than pretending an in-flight build or runtime transition was atomically cancelled.
+
+
+## Maintenance mode
+
+Use the project screen -> Maintenance mode for planned work.
+
+Enable maintenance before a risky database or infrastructure operation.
+
+Behavior:
+
+1. My Railway saves maintenance state on the service.
+2. The runtime starts a dedicated resource-limited responder.
+3. Traefik switches verified domains to that responder.
+4. The application container remains running on the private network.
+5. Visitors receive HTTP 503.
+6. Deployments may continue while maintenance remains active.
+7. Disable maintenance to remove the responder and restore the current application route.
+
+If disabling maintenance fails:
+
+- check the runtime agent
+- confirm the application container still exists/runs
+- use **Refresh live logs**
+- redeploy the current known-good release if needed
+- the maintenance responder can be removed manually with:
+
+```bash
+docker ps -a --filter label=myrailway.maintenance.service=SERVICE_ID
+docker rm -f CONTAINER_NAME
+```
+
+Then redeploy or use the domain route refresh path.
