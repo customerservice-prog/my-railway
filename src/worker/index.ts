@@ -16,9 +16,10 @@ type Deployment = {
   build_type: "auto"|"docker"|"node"|"python"|"static"; dockerfile_path: string;
   build_command: string|null; start_command: string|null; predeploy_command: string|null;
   internal_port: number; health_path: string; cpu_limit: string|number; memory_mb: number; kind: "web"|"worker";
+  runtime_port: number|null; detected_build_type: string|null;
 };
 
-const registry = env("REGISTRY_URL", "registry:5000");
+const registry = env("REGISTRY_URL", "local");
 const githubToken = optionalEnv("GITHUB_TOKEN");
 
 async function log(deploymentId: string, message: string, level="info") {
@@ -87,31 +88,42 @@ async function cloneRepository(dep: Deployment, repoDir: string) {
   }
 }
 
-async function buildImage(dep: Deployment): Promise<string> {
+async function buildImage(dep: Deployment): Promise<{image:string;runtimePort:number;detected:string}> {
   const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), "myrailway-build-"));
   try {
     await cloneRepository(dep, repoDir);
     const workdir = path.resolve(repoDir, dep.root_directory || ".");
-    if (!workdir.startsWith(repoDir)) throw new Error("root_directory escapes repository");
+    if (!workdir.startsWith(repoDir + path.sep) && workdir !== repoDir) throw new Error("root_directory escapes repository");
     const prepared = await prepareDockerfile(workdir, dep);
-    await log(dep.id, `Build type: ${prepared.detected}`);
+    const runtimePort = prepared.detected === "static" ? 80 : dep.internal_port;
+    await log(dep.id, `Build type: ${prepared.detected}; runtime port: ${runtimePort}`);
 
     const shortSha = (dep.commit_sha ?? dep.id).slice(0, 12).replace(/[^a-zA-Z0-9_.-]/g,"");
-    const image = `${registry}/${dep.project_slug}-${dep.service_id.slice(-6)}:${shortSha}`;
-    const cacheRef = `${registry}/cache/${dep.project_slug}-${dep.service_id.slice(-6)}:buildcache`;
+    const localMode = registry === "local";
+    const image = localMode
+      ? `myrailway/${dep.project_slug}-${dep.service_id.slice(-6)}:${shortSha}`
+      : `${registry}/${dep.project_slug}-${dep.service_id.slice(-6)}:${shortSha}`;
+
     await status(dep.id, "BUILDING");
     await run("docker", [
-      "buildx","build",
+      "build",
       "--file", prepared.dockerfile,
       "--tag", image,
-      "--cache-from", `type=registry,ref=${cacheRef}`,
-      "--cache-to", `type=registry,ref=${cacheRef},mode=max`,
-      "--push", "."
-    ], workdir, (line)=>log(dep.id,line));
-    await status(dep.id, "PUSHING_IMAGE");
-    await pool.query("UPDATE deployments SET image_ref=$2 WHERE id=$1", [dep.id, image]);
-    await log(dep.id, `Published immutable image ${image}`);
-    return image;
+      "."
+    ], workdir, (line)=>log(dep.id,line), { DOCKER_BUILDKIT: "1" });
+
+    if (!localMode) {
+      await status(dep.id, "PUSHING_IMAGE");
+      await log(dep.id, `Pushing image to ${registry}`);
+      await run("docker", ["push", image], workdir, (line)=>log(dep.id,line));
+    }
+
+    await pool.query(
+      "UPDATE deployments SET image_ref=$2,runtime_port=$3,detected_build_type=$4 WHERE id=$1",
+      [dep.id, image, runtimePort, prepared.detected]
+    );
+    await log(dep.id, localMode ? `Built local immutable image ${image}` : `Published immutable image ${image}`);
+    return { image, runtimePort, detected: prepared.detected };
   } finally {
     await fs.rm(repoDir, { recursive:true, force:true });
   }
@@ -137,9 +149,12 @@ async function processDeployment(deploymentId: string) {
     }
 
     let image = dep.image_ref;
+    let runtimePort = dep.runtime_port ?? (dep.build_type === "static" ? 80 : dep.internal_port);
     if (!image) {
       try {
-        image = await buildImage(dep);
+        const built = await buildImage(dep);
+        image = built.image;
+        runtimePort = built.runtimePort;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         await status(dep.id, "BUILD_FAILED", message);
@@ -158,9 +173,13 @@ async function processDeployment(deploymentId: string) {
     const vars = await query<any>("SELECT key,value_enc FROM variables WHERE service_id=$1", [dep.service_id]);
     const environment: Record<string,string> = {};
     for (const v of vars) environment[v.key] = decryptSecret(v.value_enc);
-    if (!environment.PORT) environment.PORT = String(dep.internal_port);
+    if (!environment.PORT) environment.PORT = String(runtimePort);
 
     const domains = await query<{hostname:string}>("SELECT hostname FROM domains WHERE service_id=$1 AND verified=true ORDER BY hostname", [dep.service_id]);
+    const volumes = await query<{docker_volume_name:string;mount_path:string;read_only:boolean}>(
+      "SELECT docker_volume_name,mount_path,read_only FROM volumes WHERE service_id=$1 ORDER BY created_at",
+      [dep.service_id]
+    );
     const commandId = id("cmd");
     const containerName = safeContainerName(`mr-${dep.service_id}-${dep.id.slice(-8)}`);
     const payload = {
@@ -169,13 +188,14 @@ async function processDeployment(deploymentId: string) {
       image,
       containerName,
       kind: dep.kind,
-      port: dep.build_type === "static" ? 80 : dep.internal_port,
+      port: runtimePort,
       healthPath: dep.health_path,
       cpuLimit: Number(dep.cpu_limit),
       memoryMb: dep.memory_mb,
       predeployCommand: dep.predeploy_command,
       environment,
-      domains: domains.map((d)=>d.hostname)
+      domains: domains.map((d)=>d.hostname),
+      volumes: volumes.map((v)=>({ name:v.docker_volume_name, mountPath:v.mount_path, readOnly:v.read_only }))
     };
 
     await status(dep.id, "PROVISIONING");
