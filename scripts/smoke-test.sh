@@ -69,6 +69,10 @@ SERVER_ID=local-runtime-01
 SERVER_NAME=CI Runtime
 REGISTRY_URL=local
 PLATFORM_NETWORK=myrailway
+HOST_PROJECT_DIR=$(pwd)
+PLATFORM_UPDATER_URL=http://updater:8090
+PLATFORM_UPDATER_TOKEN=$(openssl rand -hex 32)
+PLATFORM_UPDATE_REF=main
 TRAEFIK_ROUTES_DIR=/var/lib/myrailway/routes
 BACKUP_DIR=/var/lib/myrailway/backups
 BACKUP_VOLUME_NAME=myrailway-backups
@@ -90,7 +94,7 @@ mkdir -p data/routes
 touch data/acme.json
 chmod 600 data/acme.json
 
-docker compose up -d --no-build postgres redis control agent
+docker compose up -d --no-build postgres redis updater control agent
 
 for _ in $(seq 1 60); do
   if curl -fsS http://127.0.0.1:8080/healthz >/tmp/myrailway-health.json 2>/dev/null; then break; fi
@@ -127,6 +131,19 @@ expect_status "$STATUS" "201" "create project" /tmp/project.json
 
 curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/projects > /tmp/projects.json
 grep -q 'Smoke App' /tmp/projects.json
+
+# The independent updater must be reachable only through authenticated control-plane proxying.
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/platform-update-info.json -w '%{http_code}'   http://127.0.0.1:8080/api/platform/update/info)"
+test "$STATUS" = "200"
+grep -q '"ref":"main"' /tmp/platform-update-info.json
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/platform-update-status.json -w '%{http_code}'   http://127.0.0.1:8080/api/platform/update/status)"
+test "$STATUS" = "200"
+
+# In CI the configured channel is this exact main commit, so update is a safe no-op.
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/platform-update-noop.json -w '%{http_code}'   -H 'content-type: application/json'   -d '{}'   http://127.0.0.1:8080/api/platform/update)"
+test "$STATUS" = "202"
+grep -Eq '"status":"(up_to_date|running)"' /tmp/platform-update-noop.json
 
 # Cross-site state-changing browser requests must be rejected.
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/cross-site.json -w '%{http_code}'   -H 'content-type: application/json'   -H 'Origin: https://evil.example'   -H 'Sec-Fetch-Site: cross-site'   -d '{"name":"Cross Site","repoFullName":"octocat/Hello-World","branch":"master","kind":"web","buildType":"auto","internalPort":3000,"healthPath":"/"}'   http://127.0.0.1:8080/api/projects)"
