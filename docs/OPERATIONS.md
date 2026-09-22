@@ -536,3 +536,62 @@ docker rm -f CONTAINER_NAME
 ```
 
 Then redeploy or use the domain route refresh path.
+
+
+## Verified restore behavior
+
+The CI recovery drill exercises destructive restore, not only archive-format validation.
+
+### Persistent volume
+
+1. Write known data.
+2. Create backup.
+3. Validate backup archive.
+4. Corrupt/change live data.
+5. Restore backup.
+6. Verify original file contents return.
+
+### Redis
+
+Managed Redis runs with AOF enabled. A restored RDB must therefore be converted into a fresh AOF before normal activation.
+
+Restore sequence:
+
+1. stop managed Redis;
+2. remove stale AOF files;
+3. install backed-up `dump.rdb`;
+4. start temporary Redis with AOF disabled so the RDB is loaded;
+5. enable AOF from the restored in-memory dataset;
+6. wait for AOF rewrite success;
+7. stop temporary Redis;
+8. start the normal managed Redis container;
+9. require authenticated PONG;
+10. verify original application data.
+
+Redis authentication is passed with `REDISCLI_AUTH` rather than command-line `-a`, keeping passwords out of process arguments.
+
+### PostgreSQL
+
+1. Create known table/row.
+2. Create custom-format dump.
+3. Validate dump using `pg_restore --list`.
+4. Change live row.
+5. Restore with `pg_restore --clean --if-exists`.
+6. Verify original row returns.
+
+### My Railway control plane
+
+The platform backup checksum records only the archive filename, not an absolute source path.
+
+CI:
+
+1. creates a real control-plane backup;
+2. verifies the checksum after mounting the backup at a different path;
+3. creates a fresh PostgreSQL database;
+4. restores the dump into that fresh database;
+5. verifies administrator data;
+6. verifies project data;
+7. verifies schema migration history;
+8. drops the disposable restore database.
+
+This is the minimum recovery proof required before moving a critical workload.
