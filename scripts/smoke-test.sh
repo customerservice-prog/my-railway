@@ -1,7 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+checkpoint() { printf '\n[smoke] %s\n' "$1"; }
+expect_status() {
+  local actual="$1" expected="$2" label="$3" body_file="${4:-}"
+  if [ "$actual" != "$expected" ]; then
+    echo "Smoke assertion failed: $label (expected $expected, got $actual)" >&2
+    if [ -n "$body_file" ] && [ -f "$body_file" ]; then
+      echo "--- response body ---" >&2
+      cat "$body_file" >&2 || true
+      echo >&2
+    fi
+    docker compose logs --tail=120 control >&2 || true
+    exit 1
+  fi
+}
+
+cd "$(dirname "$0")/..
 
 cleanup() {
   docker compose down -v --remove-orphans >/dev/null 2>&1 || true
@@ -62,61 +77,65 @@ grep -q '"status":"ok"' /tmp/myrailway-health.json || {
 }
 
 STATUS="$(curl -sS -o /tmp/bootstrap.json -w '%{http_code}'   -H 'content-type: application/json'   -d '{"email":"ci@example.com","password":"ci-password-123456"}'   http://127.0.0.1:8080/api/auth/bootstrap)"
-test "$STATUS" = "201"
+expect_status "$STATUS" "201" "bootstrap first administrator" /tmp/bootstrap.json
 
 STATUS="$(curl -sS -o /tmp/bootstrap2.json -w '%{http_code}'   -H 'content-type: application/json'   -d '{"email":"other@example.com","password":"another-password-123456"}'   http://127.0.0.1:8080/api/auth/bootstrap)"
-test "$STATUS" = "409"
+expect_status "$STATUS" "409" "reject second bootstrap" /tmp/bootstrap2.json
 
 STATUS="$(curl -sS -o /tmp/unauth.json -w '%{http_code}' http://127.0.0.1:8080/api/overview)"
-test "$STATUS" = "401"
+expect_status "$STATUS" "401" "unauthorized/rejected request" /tmp/unauth.json
 
+checkpoint "password login"
 STATUS="$(curl -sS -c /tmp/cookies.txt -o /tmp/login.json -w '%{http_code}'   -H 'content-type: application/json'   -d '{"email":"ci@example.com","password":"ci-password-123456"}'   http://127.0.0.1:8080/api/auth/login)"
-test "$STATUS" = "200"
+expect_status "$STATUS" "200" "password login" /tmp/login.json
 
 curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/auth/me > /tmp/me.json
 grep -q 'ci@example.com' /tmp/me.json
 
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/project.json -w '%{http_code}'   -H 'content-type: application/json'   -d '{"name":"Smoke App","repoFullName":"octocat/Hello-World","branch":"master","kind":"web","buildType":"auto","internalPort":3000,"healthPath":"/"}'   http://127.0.0.1:8080/api/projects)"
-test "$STATUS" = "201"
+expect_status "$STATUS" "201" "create project" /tmp/project.json
 
 curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/projects > /tmp/projects.json
 grep -q 'Smoke App' /tmp/projects.json
 
 # Cross-site state-changing browser requests must be rejected.
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/cross-site.json -w '%{http_code}'   -H 'content-type: application/json'   -H 'Origin: https://evil.example'   -H 'Sec-Fetch-Site: cross-site'   -d '{"name":"Cross Site","repoFullName":"octocat/Hello-World","branch":"master","kind":"web","buildType":"auto","internalPort":3000,"healthPath":"/"}'   http://127.0.0.1:8080/api/projects)"
-test "$STATUS" = "403"
+expect_status "$STATUS" "403" "cross-site mutation rejection" /tmp/cross-site.json
 
 # Keep a second session so session-version revocation can be verified later.
 STATUS="$(curl -sS -c /tmp/cookies-old.txt -o /tmp/login-old.json -w '%{http_code}'   -H 'content-type: application/json'   -d '{"email":"ci@example.com","password":"ci-password-123456"}'   http://127.0.0.1:8080/api/auth/login)"
-test "$STATUS" = "200"
+expect_status "$STATUS" "200" "second session login" /tmp/login-old.json
 
 # Enable TOTP and obtain high-entropy one-time recovery codes.
 curl -fsS -b /tmp/cookies.txt -H 'content-type: application/json' -X POST   http://127.0.0.1:8080/api/auth/totp/enroll > /tmp/totp-enroll.json
 TOTP_SECRET="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/totp-enroll.json","utf8")).secret)')"
 TOTP_CODE="$(node --input-type=module -e 'import { authenticator } from "otplib"; process.stdout.write(authenticator.generate(process.argv[1]))' "$TOTP_SECRET")"
 
+checkpoint "TOTP confirmation"
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/totp-confirm.json -w '%{http_code}'   -H 'content-type: application/json'   -d "{"token":"$TOTP_CODE"}"   http://127.0.0.1:8080/api/auth/totp/confirm)"
-test "$STATUS" = "200"
+expect_status "$STATUS" "200" "TOTP confirmation" /tmp/totp-confirm.json
 RECOVERY_CODE="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/totp-confirm.json","utf8")).recoveryCodes[0])')"
 
 # A recovery code authenticates exactly once.
+checkpoint "one-time recovery login"
 STATUS="$(curl -sS -c /tmp/cookies-recovery.txt -o /tmp/login-recovery.json -w '%{http_code}'   -H 'content-type: application/json'   -d "{"email":"ci@example.com","password":"ci-password-123456","recoveryCode":"$RECOVERY_CODE"}"   http://127.0.0.1:8080/api/auth/login)"
-test "$STATUS" = "200"
+expect_status "$STATUS" "200" "recovery-code login" /tmp/login-recovery.json
 
 STATUS="$(curl -sS -o /tmp/login-recovery-reuse.json -w '%{http_code}'   -H 'content-type: application/json'   -d "{"email":"ci@example.com","password":"ci-password-123456","recoveryCode":"$RECOVERY_CODE"}"   http://127.0.0.1:8080/api/auth/login)"
-test "$STATUS" = "401"
+expect_status "$STATUS" "401" "recovery code cannot be reused" /tmp/login-recovery-reuse.json
 
 # Revoking sessions invalidates every older cookie while reissuing this verified session.
 TOTP_CODE="$(node --input-type=module -e 'import { authenticator } from "otplib"; process.stdout.write(authenticator.generate(process.argv[1]))' "$TOTP_SECRET")"
+checkpoint "session revocation"
 STATUS="$(curl -sS -b /tmp/cookies.txt -c /tmp/cookies.txt -o /tmp/revoke.json -w '%{http_code}'   -H 'content-type: application/json'   -d "{"password":"ci-password-123456","totp":"$TOTP_CODE"}"   http://127.0.0.1:8080/api/auth/sessions/revoke)"
-test "$STATUS" = "200"
+expect_status "$STATUS" "200" "session revocation" /tmp/revoke.json
 
 STATUS="$(curl -sS -b /tmp/cookies-old.txt -o /tmp/old-session.json -w '%{http_code}' http://127.0.0.1:8080/api/overview)"
-test "$STATUS" = "401"
+expect_status "$STATUS" "401" "old session rejected after revoke" /tmp/old-session.json
 curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/overview >/tmp/current-session.json
 
 STATUS="$(curl -sS -o /tmp/webhook.json -w '%{http_code}'   -H 'content-type: application/json'   -H 'x-github-delivery: ci-invalid'   -H 'x-github-event: push'   -H 'x-hub-signature-256: sha256=invalid'   -d '{"ref":"refs/heads/main"}'   http://127.0.0.1:8080/api/webhooks/github)"
-test "$STATUS" = "401"
+expect_status "$STATUS" "401" "invalid webhook signature rejected" /tmp/webhook.json
 
 curl -sSI http://127.0.0.1:8080/ | tr -d '\r' > /tmp/headers.txt
 grep -qi '^x-frame-options: DENY$' /tmp/headers.txt
