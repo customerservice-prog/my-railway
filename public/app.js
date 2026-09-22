@@ -509,6 +509,21 @@ async function renderSecurity() {
           ? '<div class="row mt16"><button id="regenerate-recovery">Generate new recovery codes</button></div>'
           : '<div class="row mt16"><button id="enroll-totp" class="primary">Set up authenticator</button></div>'}
         <div id="totp-setup"></div>
+
+        <div class="section-head"><h3>Password & sessions</h3></div>
+        <form id="password-change-form" class="form-grid">
+          <label>Current password<input id="password-current" type="password" required></label>
+          <label>New password<input id="password-new" type="password" minlength="12" required></label>
+          ${user.totp_enabled ? '<label>Authenticator code<input id="password-totp" inputmode="numeric" required></label>' : ""}
+          <div class="row align-end"><button class="primary">Change password</button></div>
+        </form>
+        <div class="section-head"><h3>Emergency session revoke</h3></div>
+        <p class="muted">Use this if you think another browser/session may still be signed in. Your current verified session will remain active.</p>
+        <form id="revoke-sessions-form" class="form-grid">
+          <label>Password<input id="revoke-password" type="password" required></label>
+          ${user.totp_enabled ? '<label>Authenticator code<input id="revoke-totp" inputmode="numeric" required></label>' : ""}
+          <div class="row align-end"><button>Revoke other sessions</button></div>
+        </form>
       </div>
     </div>
   `;
@@ -537,6 +552,37 @@ async function renderSecurity() {
         `);
         renderSecurity();
       };
+    } catch (error) { alert(error.message); }
+  };
+
+  $("#password-change-form").onsubmit = async (event) => {
+    event.preventDefault();
+    try {
+      await api("/api/auth/password", {
+        method:"POST",
+        body:JSON.stringify({
+          currentPassword:$("#password-current").value,
+          newPassword:$("#password-new").value,
+          totp:$("#password-totp")?.value || undefined
+        })
+      });
+      alert("Password changed. All older sessions were invalidated.");
+      event.currentTarget.reset();
+    } catch (error) { alert(error.message); }
+  };
+
+  $("#revoke-sessions-form").onsubmit = async (event) => {
+    event.preventDefault();
+    try {
+      await api("/api/auth/sessions/revoke", {
+        method:"POST",
+        body:JSON.stringify({
+          password:$("#revoke-password").value,
+          totp:$("#revoke-totp")?.value || undefined
+        })
+      });
+      alert("Older sessions revoked.");
+      event.currentTarget.reset();
     } catch (error) { alert(error.message); }
   };
 
