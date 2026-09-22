@@ -365,3 +365,19 @@ These are intentionally **not** required for private v1, but are mandatory befor
 - [ ] Unused labeled My Railway release images are removed after IMAGE_RETENTION_HOURS.
 - [ ] Running/current application images are not pruned.
 - [ ] A retained rollback image remains available inside the intended retention window.
+
+
+## Maintenance mode
+
+- [ ] Enable maintenance on a live disposable web service.
+- [ ] Application container remains running privately.
+- [ ] Maintenance responder container is separate from the app container.
+- [ ] Responder returns HTTP 503.
+- [ ] Retry-After header is present.
+- [ ] Custom message is shown.
+- [ ] HTML/script characters in the custom message are escaped.
+- [ ] Deploy a new release while maintenance is enabled.
+- [ ] Public route remains on maintenance after deployment.
+- [ ] Disable maintenance.
+- [ ] Maintenance responder is removed.
+- [ ] Current application route is restored without rebuilding.
