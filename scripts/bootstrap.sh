@@ -37,7 +37,12 @@ set -a
 source .env
 set +a
 
+if [ -n "${ACME_EMAIL:-}" ]; then
+  sed -i "s|^      email: .*|      email: ${ACME_EMAIL}|" infra/traefik/traefik.yml
+fi
+
 if [ -n "${PLATFORM_HOST:-}" ]; then
+  replace_env COOKIE_SECURE true
   cat > data/routes/control.yml <<EOF
 http:
   routers:
