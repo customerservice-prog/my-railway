@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import { encryptSecret, decryptSecret } from "../src/shared/crypto.js";
 import { slug, safeContainerName } from "../src/shared/util.js";
 
@@ -20,7 +21,6 @@ test("slug and container name remove unsafe characters", () => {
 
 
 test("service PATCH builds a bound id placeholder", () => {
-  const fs = require("node:fs");
   const source = fs.readFileSync("src/control/server.ts","utf8");
   assert.match(source, /const idPlaceholder = `\$\$\{values\.length\}`/);
   assert.doesNotMatch(source, /WHERE id=\$\{values\.length\}/);
