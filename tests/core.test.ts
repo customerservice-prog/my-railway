@@ -22,6 +22,6 @@ test("slug and container name remove unsafe characters", () => {
 
 test("service PATCH builds a bound id placeholder", () => {
   const source = fs.readFileSync("src/control/server.ts","utf8");
-  assert.match(source, /const idPlaceholder = `\$\$\{values\.length\}`/);
-  assert.doesNotMatch(source, /WHERE id=\$\{values\.length\}/);
+  assert.match(source, /const idPlaceholder = "\\$" \+ values\.length;/);
+  assert.doesNotMatch(source, /const idPlaceholder = `?\$?\{values\.length\}`?/);
 });
