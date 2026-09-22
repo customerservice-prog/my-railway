@@ -257,6 +257,18 @@ Only enable after migration safety has been proven.
 - [ ] Expired files are cleaned.
 - [ ] Backup disk usage is monitored.
 
+## Destructive restore proof
+
+- [ ] Persistent volume is intentionally changed after backup and restored to its original contents.
+- [ ] Redis key is intentionally changed after backup and restored to its original value.
+- [ ] Redis restore removes stale AOF state and regenerates AOF from the restored RDB.
+- [ ] PostgreSQL row is intentionally changed after backup and restored to its original value.
+- [ ] Control-plane backup checksum verifies from a different mount/path.
+- [ ] Control-plane backup restores into a fresh disposable database.
+- [ ] Restored control-plane database contains expected users.
+- [ ] Restored control-plane database contains expected projects.
+- [ ] Restored control-plane database contains schema migration history.
+
 ## Offsite disaster recovery
 
 - [ ] Restic repository is on a different failure domain.
