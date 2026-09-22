@@ -25,6 +25,8 @@
         <form id="bootstrap-form">
           <label>Admin email<input id="bootstrap-email" type="email" value="admin@localhost" /></label>
           <label>New password<input id="bootstrap-password" type="password" minlength="12" required /></label>
+          <label>Setup token<input id="bootstrap-token" type="password" autocomplete="off" required /></label>
+          <p class="muted">On the server: grep '^ADMIN_BOOTSTRAP_TOKEN=' .env</p>
           <button type="submit">Initialize platform</button>
         </form>
       </details>
