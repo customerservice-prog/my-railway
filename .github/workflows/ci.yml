@@ -32,3 +32,4 @@ jobs:
       - run: docker build -f Dockerfile.updater -t my-railway-updater:local .
       - run: bash scripts/smoke-test.sh
       - run: bash scripts/self-update-integration-test.sh
+      - run: bash scripts/settings-rollback-integration-test.sh
