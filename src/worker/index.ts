@@ -244,7 +244,7 @@ async function processDeployment(deploymentId: string) {
 
     const domains = await query<{hostname:string}>("SELECT hostname FROM domains WHERE service_id=$1 AND verified=true ORDER BY hostname", [dep.service_id]);
     const volumes = await query<{docker_volume_name:string;mount_path:string;read_only:boolean}>(
-      "SELECT docker_volume_name,mount_path,read_only FROM volumes WHERE service_id=$1 ORDER BY created_at",
+      "SELECT docker_volume_name,mount_path,read_only FROM volumes WHERE service_id=$1 AND status='attached' ORDER BY created_at",
       [dep.service_id]
     );
     const commandId = id("cmd");
