@@ -216,6 +216,39 @@ MAINT_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse
 wait_command "$MAINT_COMMAND" "disable maintenance"
 test -z "$(docker ps -q --filter "label=myrailway.maintenance.service=$SERVICE_ID")"
 
+checkpoint "persistent volume lifecycle"
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/volume-create.json -w '%{http_code}' -H 'content-type: application/json' -d '{"name":"Smoke Uploads","mountPath":"/app/uploads","readOnly":false}' "http://127.0.0.1:8080/api/services/$SERVICE_ID/volumes")"
+expect_status "$STATUS" "201" "create persistent volume metadata" /tmp/volume-create.json
+VOLUME_ID="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/volume-create.json","utf8"));process.stdout.write(x.id)')"
+VOLUME_NAME="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/volume-create.json","utf8"));process.stdout.write(x.dockerVolumeName)')"
+docker volume create "$VOLUME_NAME" >/dev/null
+docker run --rm -v "$VOLUME_NAME:/data" alpine:3.20 sh -lc 'echo retained >/data/proof.txt'
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/volume-detach.json -w '%{http_code}' -X DELETE -H 'content-type: application/json' -d '{"confirm":"KEEP_DATA"}' "http://127.0.0.1:8080/api/volumes/$VOLUME_ID")"
+expect_status "$STATUS" "202" "queue persistent volume detach" /tmp/volume-detach.json
+VOLUME_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/volume-detach.json","utf8")).commandId)')"
+wait_command "$VOLUME_COMMAND" "persistent volume detach"
+docker volume inspect "$VOLUME_NAME" >/dev/null
+docker run --rm -v "$VOLUME_NAME:/data:ro" alpine:3.20 grep -q retained /data/proof.txt
+curl -fsS -b /tmp/cookies.txt "http://127.0.0.1:8080/api/projects/$PROJECT_ID" > /tmp/project-volume-detached.json
+node -e 'const fs=require("fs");const id=process.argv[1];const p=JSON.parse(fs.readFileSync("/tmp/project-volume-detached.json","utf8"));const v=p.services[0].volumes.find(x=>x.id===id);if(!v||v.status!=="detached")process.exit(1)' "$VOLUME_ID"
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/volume-reattach.json -w '%{http_code}' -H 'content-type: application/json' -d '{}' "http://127.0.0.1:8080/api/volumes/$VOLUME_ID/reattach")"
+expect_status "$STATUS" "200" "reattach retained persistent volume" /tmp/volume-reattach.json
+curl -fsS -b /tmp/cookies.txt "http://127.0.0.1:8080/api/projects/$PROJECT_ID" > /tmp/project-volume-attached.json
+node -e 'const fs=require("fs");const id=process.argv[1];const p=JSON.parse(fs.readFileSync("/tmp/project-volume-attached.json","utf8"));const v=p.services[0].volumes.find(x=>x.id===id);if(!v||v.status!=="attached")process.exit(1)' "$VOLUME_ID"
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/volume-delete.json -w '%{http_code}' -X DELETE -H 'content-type: application/json' -d '{"confirm":"DELETE_DATA"}' "http://127.0.0.1:8080/api/volumes/$VOLUME_ID")"
+expect_status "$STATUS" "202" "queue permanent persistent volume deletion" /tmp/volume-delete.json
+VOLUME_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/volume-delete.json","utf8")).commandId)')"
+wait_command "$VOLUME_COMMAND" "persistent volume deletion"
+if docker volume inspect "$VOLUME_NAME" >/dev/null 2>&1; then
+  echo "Persistent volume still exists after DELETE_DATA" >&2
+  exit 1
+fi
+curl -fsS -b /tmp/cookies.txt "http://127.0.0.1:8080/api/projects/$PROJECT_ID" > /tmp/project-volume-deleted.json
+node -e 'const fs=require("fs");const id=process.argv[1];const p=JSON.parse(fs.readFileSync("/tmp/project-volume-deleted.json","utf8"));if(p.services[0].volumes.some(x=>x.id===id))process.exit(1)' "$VOLUME_ID"
+
 checkpoint "multi-service project"
 node -e 'require("fs").writeFileSync("/tmp/service-create.json",JSON.stringify({name:"Smoke Worker",repoFullName:"octocat/Hello-World",branch:"master",kind:"worker",buildType:"auto",internalPort:3000,healthPath:"/"}))'
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/service-create-response.json -w '%{http_code}' -H 'content-type: application/json' --data-binary @/tmp/service-create.json "http://127.0.0.1:8080/api/projects/$PROJECT_ID/services")"
