@@ -51,6 +51,28 @@ services:
       - ./data/acme.json:/etc/traefik/acme.json
     networks: [myrailway]
 
+  updater:
+    build:
+      context: .
+      dockerfile: Dockerfile.updater
+    image: my-railway-updater:local
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      UPDATER_PORT: 8090
+      HOST_PROJECT_DIR: ${HOST_PROJECT_DIR:-/opt/my-railway}
+      PLATFORM_UPDATE_REF: ${PLATFORM_UPDATE_REF:-release/private-v1-rc1}
+    working_dir: ${HOST_PROJECT_DIR:-/opt/my-railway}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOST_PROJECT_DIR:-/opt/my-railway}:${HOST_PROJECT_DIR:-/opt/my-railway}
+    networks: [myrailway]
+    healthcheck:
+      test: ["CMD","curl","-fsS","http://127.0.0.1:8090/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
   control:
     build: .
     image: my-railway:local
