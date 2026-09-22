@@ -60,6 +60,7 @@ REDIS_URL=redis://redis:6379
 SESSION_SECRET=$SESSION_SECRET
 SECRET_ENCRYPTION_KEY=$SECRET_ENCRYPTION_KEY
 ADMIN_BOOTSTRAP_PASSWORD=
+ADMIN_BOOTSTRAP_TOKEN=ci-bootstrap-token-0123456789abcdef0123456789abcdef
 GITHUB_WEBHOOK_SECRET=ci-webhook-secret
 GITHUB_TOKEN=
 AGENT_TOKEN=$AGENT_TOKEN
@@ -102,7 +103,10 @@ grep -q '"status":"ok"' /tmp/myrailway-health.json || {
   exit 1
 }
 
-STATUS="$(curl -sS -o /tmp/bootstrap.json -w '%{http_code}'   -H 'content-type: application/json'   -d '{"email":"ci@example.com","password":"ci-password-123456"}'   http://127.0.0.1:8080/api/auth/bootstrap)"
+STATUS="$(curl -sS -o /tmp/bootstrap-bad-token.json -w '%{http_code}' -H 'content-type: application/json' -d '{"email":"ci@example.com","password":"ci-password-123456","setupToken":"wrong-token"}' http://127.0.0.1:8080/api/auth/bootstrap)"
+expect_status "$STATUS" "401" "reject invalid bootstrap token" /tmp/bootstrap-bad-token.json
+
+STATUS="$(curl -sS -o /tmp/bootstrap.json -w '%{http_code}' -H 'content-type: application/json' -d '{"email":"ci@example.com","password":"ci-password-123456","setupToken":"ci-bootstrap-token-0123456789abcdef0123456789abcdef"}' http://127.0.0.1:8080/api/auth/bootstrap)"
 expect_status "$STATUS" "201" "bootstrap first administrator" /tmp/bootstrap.json
 
 STATUS="$(curl -sS -o /tmp/bootstrap2.json -w '%{http_code}'   -H 'content-type: application/json'   -d '{"email":"other@example.com","password":"another-password-123456"}'   http://127.0.0.1:8080/api/auth/bootstrap)"
