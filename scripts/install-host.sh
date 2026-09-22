@@ -6,7 +6,7 @@ INSTALL_DIR="/opt/my-railway"
 PLATFORM_HOST=""
 PUBLIC_IP=""
 ACME_EMAIL=""
-NO_FIREWALL=false
+CONFIGURE_FIREWALL=false
 
 usage() {
   cat <<'EOF'
@@ -19,7 +19,7 @@ Options:
   --email EMAIL        ACME/Let's Encrypt contact email.
   --repo URL           Git repository to install from.
   --dir PATH           Installation directory (default /opt/my-railway).
-  --no-firewall        Do not configure UFW rules.
+  --configure-firewall Configure UFW for OpenSSH, 80/tcp, and 443/tcp.
   -h, --help           Show this help.
 EOF
 }
@@ -31,7 +31,7 @@ while [ "$#" -gt 0 ]; do
     --email) ACME_EMAIL="${2:-}"; shift 2 ;;
     --repo) REPO_URL="${2:-}"; shift 2 ;;
     --dir) INSTALL_DIR="${2:-}"; shift 2 ;;
-    --no-firewall) NO_FIREWALL=true; shift ;;
+    --configure-firewall) CONFIGURE_FIREWALL=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -129,7 +129,7 @@ fi
 
 ./scripts/bootstrap.sh
 
-if [ "$NO_FIREWALL" = false ]; then
+if [ "$CONFIGURE_FIREWALL" = true ]; then
   ufw allow OpenSSH >/dev/null
   ufw allow 80/tcp >/dev/null
   ufw allow 443/tcp >/dev/null
