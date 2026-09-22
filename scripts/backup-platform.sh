@@ -24,7 +24,10 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
 else
   pg_dump -h "$HOST" -U "$USER" -d "$DB" --no-owner --no-acl | gzip -9 > "$OUT"
 fi
-sha256sum "$OUT" > "$OUT.sha256"
+(
+  cd "$DIR"
+  sha256sum "$(basename "$OUT")" > "$(basename "$OUT").sha256"
+)
 
 find "$DIR" -type f -name 'control-*.sql.gz' -mtime "+$RETENTION" -delete
 find "$DIR" -type f -name 'control-*.sql.gz.sha256' -mtime "+$RETENTION" -delete
