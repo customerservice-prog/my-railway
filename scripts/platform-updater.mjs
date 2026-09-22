@@ -20,6 +20,7 @@ if (token.length < 32) {
 }
 
 await fs.mkdir(dataDir, { recursive: true });
+await exec("git", ["config","--global","--add","safe.directory",root]).catch(()=>{});
 
 function safeEqual(a, b) {
   const aa = Buffer.from(String(a || ""));
@@ -82,11 +83,15 @@ async function updateInfo() {
   let targetSha = null;
   let remoteError = null;
   try {
-    const { stdout } = await exec("git", ["-C", root, "ls-remote", "origin", `refs/heads/${updateRef}`], {
-      timeout: 20_000,
-      maxBuffer: 1_000_000
-    });
-    targetSha = stdout.trim().split(/\s+/)[0] || null;
+    if (/^[0-9a-f]{40}$/i.test(updateRef)) {
+      targetSha = updateRef.toLowerCase();
+    } else {
+      const { stdout } = await exec("git", ["-C", root, "ls-remote", "origin", `refs/heads/${updateRef}`], {
+        timeout: 20_000,
+        maxBuffer: 1_000_000
+      });
+      targetSha = stdout.trim().split(/\s+/)[0] || null;
+    }
   } catch (error) {
     remoteError = error instanceof Error ? error.message : String(error);
   }
