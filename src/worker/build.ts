@@ -10,20 +10,51 @@ export type ServiceBuildConfig = {
   internal_port: number;
 };
 
-export async function run(command: string, args: string[], cwd: string, onLine: (line:string)=>Promise<void>|void, env?: NodeJS.ProcessEnv): Promise<void> {
+export async function run(
+  command: string,
+  args: string[],
+  cwd: string,
+  onLine: (line:string)=>Promise<void>|void,
+  env?: NodeJS.ProcessEnv,
+  timeoutMs = 0
+): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const child = spawn(command, args, { cwd, env: { ...process.env, ...env }, stdio: ["ignore","pipe","pipe"] });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      error ? reject(error) : resolve();
+    };
+
     const emit = (chunk: Buffer, kind: "stdout"|"stderr") => {
       const text = chunk.toString();
-      if (kind === "stdout") stdout += text; else stderr += text;
+      if (kind === "stdout") stdout = (stdout + text).slice(-200_000);
+      else stderr = (stderr + text).slice(-200_000);
       for (const line of text.split(/\r?\n/).filter(Boolean)) void onLine(line);
     };
-    child.stdout.on("data", (c) => emit(c, "stdout"));
-    child.stderr.on("data", (c) => emit(c, "stderr"));
-    child.on("error", reject);
-    child.on("close", (code) => code === 0 ? resolve() : reject(new Error(`${command} exited with code ${code}: ${stderr.slice(-2000) || stdout.slice(-2000)}`)));
+
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        finish(new Error(`${command} timed out after ${Math.round(timeoutMs/1000)} seconds`));
+      }, timeoutMs);
+      timer.unref();
+    }
+
+    child.stdout.on("data", (chunk) => emit(chunk, "stdout"));
+    child.stderr.on("data", (chunk) => emit(chunk, "stderr"));
+    child.on("error", (error) => finish(error));
+    child.on("close", (code) => {
+      if (settled) return;
+      if (code === 0) return finish();
+      finish(new Error(`${command} exited with code ${code}: ${stderr.slice(-2000) || stdout.slice(-2000)}`));
+    });
   });
 }
 
