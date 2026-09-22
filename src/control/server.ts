@@ -201,9 +201,15 @@ function validateCron(expression: string, timezone: string, hashSeed?: string): 
 
 async function redactServiceSecrets(serviceId: string | undefined, value: string) {
   if (!serviceId) return value;
-  const vars = await query<{value_enc:string}>("SELECT value_enc FROM variables WHERE service_id=$1", [serviceId]);
+  const [vars, databases] = await Promise.all([
+    query<{value_enc:string}>("SELECT value_enc FROM variables WHERE service_id=$1", [serviceId]),
+    query<{password_enc:string}>("SELECT password_enc FROM database_resources WHERE service_id=$1", [serviceId])
+  ]);
   let redacted=value;
-  const secrets=vars.map((row)=>decryptSecret(row.value_enc)).filter((v)=>v.length>=4).sort((a,b)=>b.length-a.length);
+  const secrets = [
+    ...vars.map((row)=>decryptSecret(row.value_enc)),
+    ...databases.map((row)=>decryptSecret(row.password_enc))
+  ].filter((v)=>v.length>=4).sort((a,b)=>b.length-a.length);
   for(const secret of secrets) redacted=redacted.split(secret).join("***");
   return redacted;
 }
@@ -1180,12 +1186,17 @@ app.delete("/api/databases/:id", auth, async (req: AuthedRequest, res) => {
   const database = await one<any>("SELECT * FROM database_resources WHERE id=$1", [String(req.params.id)]);
   if(!database) return res.status(404).json({error:"database not found"});
   const deleteData = req.body?.confirm === "DELETE_DATA";
+  if (database.status === "deleting") return res.status(409).json({error:"database deletion is already in progress"});
   const commandId = await enqueueAgentCommand(database.server_id,"REMOVE_DATABASE",{
     databaseId:database.id,dockerName:database.docker_name,volumeName:database.volume_name,deleteData
   });
-  await pool.query("DELETE FROM database_resources WHERE id=$1",[database.id]);
-  await audit(req.userId ?? "unknown","database.delete","database",database.id,{deleteData});
-  res.status(202).json({commandId,dataDeleted:deleteData,note:deleteData ? "Database container and data volume will be removed." : "Database container will be removed; data volume is retained."});
+  await pool.query("UPDATE database_resources SET status='deleting',updated_at=now() WHERE id=$1",[database.id]);
+  await audit(req.userId ?? "unknown","database.delete.requested","database",database.id,{deleteData,commandId});
+  res.status(202).json({
+    commandId,
+    dataDeleted:deleteData,
+    note:deleteData ? "Database deletion is queued; metadata will be removed after the runtime confirms container and data-volume deletion." : "Database removal is queued; metadata will be removed after the runtime confirms cleanup and the data volume will be retained."
+  });
 });
 
 app.post("/api/databases/:id/backup", auth, async (req: AuthedRequest, res) => {
@@ -1273,15 +1284,16 @@ app.post("/api/volumes/:id/backup", auth, async (req: AuthedRequest, res) => {
   `, [volume.service_id]);
   if (!active?.server_id) return res.status(409).json({ error: "no active runtime server for this service" });
   const backupId = id("bak");
-  const commandId = id("cmd");
   await pool.query(
     "INSERT INTO backups(id,service_id,volume_id,server_id,kind,status) VALUES($1,$2,$3,$4,'volume','queued')",
     [backupId, volume.service_id, volume.id, active.server_id]
   );
-  await pool.query(
-    "INSERT INTO agent_commands(id,server_id,action,payload) VALUES($1,$2,'BACKUP_VOLUME',$3)",
-    [commandId, active.server_id, JSON.stringify({ volumeName: volume.docker_volume_name, backupName: backupId, backupId })]
-  );
+  const commandId = await enqueueAgentCommand(active.server_id,"BACKUP_VOLUME",{
+    volumeName: volume.docker_volume_name,
+    backupName: backupId,
+    backupId,
+    serviceId: volume.service_id
+  });
   await audit(req.userId ?? "unknown", "backup.create", "backup", backupId, { volumeId: volume.id });
   res.status(202).json({ backupId, commandId });
 });
@@ -1318,16 +1330,12 @@ app.post("/api/backups/:id/restore", auth, async (req: AuthedRequest, res) => {
   if (!backup || backup.status !== "completed" || !backup.location || !backup.server_id) {
     return res.status(409).json({ error: "completed volume backup with a runtime location is required" });
   }
-  const commandId = id("cmd");
-  await pool.query(
-    "INSERT INTO agent_commands(id,server_id,action,payload) VALUES($1,$2,'RESTORE_VOLUME',$3)",
-    [commandId, backup.server_id, JSON.stringify({
-      backupId: backup.id,
-      serviceId: backup.service_id,
-      volumeName: backup.docker_volume_name,
-      fileName: path.basename(backup.location)
-    })]
-  );
+  const commandId = await enqueueAgentCommand(backup.server_id,"RESTORE_VOLUME",{
+    backupId: backup.id,
+    serviceId: backup.service_id,
+    volumeName: backup.docker_volume_name,
+    fileName: path.basename(backup.location)
+  });
   await audit(req.userId ?? "unknown", "backup.restore", "backup", backup.id, { serviceId: backup.service_id });
   res.status(202).json({
     commandId,
@@ -1342,12 +1350,7 @@ async function sendServiceCommand(serviceId: string, action: "STOP"|"RESTART") {
     ORDER BY created_at DESC LIMIT 1
   `, [serviceId]);
   if (!active?.server_id) return null;
-  const commandId = id("cmd");
-  await pool.query(
-    "INSERT INTO agent_commands(id,server_id,action,payload) VALUES($1,$2,$3,$4)",
-    [commandId, active.server_id, action, JSON.stringify({ serviceId })]
-  );
-  return commandId;
+  return enqueueAgentCommand(active.server_id,action,{ serviceId });
 }
 
 app.get("/api/commands/:id", auth, async (req, res) => {
@@ -1367,11 +1370,7 @@ app.post("/api/services/:id/logs/refresh", auth, async (req: AuthedRequest, res)
     ORDER BY created_at DESC LIMIT 1
   `, [serviceId]);
   if (!active?.server_id) return res.status(409).json({ error: "service has never been assigned to a runtime server" });
-  const commandId = id("cmd");
-  await pool.query(
-    "INSERT INTO agent_commands(id,server_id,deployment_id,action,payload) VALUES($1,$2,$3,'FETCH_LOGS',$4)",
-    [commandId, active.server_id, active.id, JSON.stringify({ serviceId })]
-  );
+  const commandId = await enqueueAgentCommand(active.server_id,"FETCH_LOGS",{ serviceId },active.id);
   await audit(req.userId ?? "unknown", "runtime.logs.refresh", "service", serviceId);
   res.status(202).json({ commandId, deploymentId: active.id });
 });
@@ -1383,11 +1382,7 @@ app.post("/api/platform/self-test", auth, async (req: AuthedRequest, res) => {
     ORDER BY load1 ASC NULLS LAST LIMIT 1
   `);
   if (!server) return res.status(409).json({ error: "no online runtime server available" });
-  const commandId = id("cmd");
-  await pool.query(
-    "INSERT INTO agent_commands(id,server_id,action,payload) VALUES($1,$2,'SELF_TEST','{}'::jsonb)",
-    [commandId, server.id]
-  );
+  const commandId = await enqueueAgentCommand(server.id,"SELF_TEST",{});
   await audit(req.userId ?? "unknown", "platform.self_test", "server", server.id);
   res.status(202).json({ commandId, server });
 });
