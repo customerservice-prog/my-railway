@@ -1991,6 +1991,73 @@ app.get("/api/platform/readiness", auth, async (_req, res) => {
     add("control-dns","Control-plane DNS","warning","Configure PLATFORM_HOST and PUBLIC_IP before DNS can be verified.");
   }
 
+  let certificateHealthy = false;
+  if (platformHost) {
+    try {
+      const certificate = await platformUpdaterRequest(`/certificate?hostname=${encodeURIComponent(platformHost)}`);
+      if (!certificate.found) {
+        add(
+          "certificate",
+          "Dashboard TLS certificate",
+          "blocker",
+          `No Traefik ACME certificate is stored for ${platformHost} yet.`
+        );
+      } else if (certificate.parseError) {
+        add(
+          "certificate",
+          "Dashboard TLS certificate",
+          "blocker",
+          `Certificate exists but could not be parsed: ${certificate.parseError}`
+        );
+      } else {
+        const daysRemaining = Number(certificate.daysRemaining ?? -1);
+        certificateHealthy = !certificate.expired && daysRemaining > 0;
+        add(
+          "certificate",
+          "Dashboard TLS certificate",
+          certificate.expired || daysRemaining <= 0 ? "blocker" : daysRemaining < 14 ? "warning" : "pass",
+          certificate.expired
+            ? `Certificate for ${platformHost} is expired.`
+            : `Certificate is valid through ${certificate.validTo} (${daysRemaining} day(s) remaining).`
+        );
+      }
+    } catch (error) {
+      add(
+        "certificate",
+        "Dashboard TLS certificate",
+        "blocker",
+        `Certificate status unavailable: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    try {
+      const response = await fetch(`https://${platformHost}/healthz`, {
+        redirect:"error",
+        signal:AbortSignal.timeout(10_000)
+      });
+      add(
+        "public-https",
+        "Public HTTPS reachability",
+        response.ok ? "pass" : "blocker",
+        response.ok
+          ? `https://${platformHost}/healthz is reachable with a trusted certificate.`
+          : `Public HTTPS returned HTTP ${response.status}.`
+      );
+    } catch (error) {
+      add(
+        "public-https",
+        "Public HTTPS reachability",
+        certificateHealthy ? "warning" : "blocker",
+        certificateHealthy
+          ? `A valid certificate exists, but this host could not probe its own public HTTPS endpoint. This can happen when the provider/router does not support NAT hairpin; verify https://${platformHost}/healthz from an external network.`
+          : `Public HTTPS probe failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  } else {
+    add("certificate","Dashboard TLS certificate","warning","Configure PLATFORM_HOST before certificate status can be checked.");
+    add("public-https","Public HTTPS reachability","warning","Configure PLATFORM_HOST before public HTTPS can be checked.");
+  }
+
   const serverCounts = await one<{online:string;draining:string}>(`
     SELECT
       count(*) FILTER (WHERE last_seen_at > now() - interval '45 seconds')::text AS online,
