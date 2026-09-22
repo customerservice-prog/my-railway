@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${HOST_PROJECT_DIR:-/opt/my-railway}"
+SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="${HOST_PROJECT_DIR:-$SCRIPT_ROOT}"
 LOG="$ROOT/data/platform-settings.log"
 STATE="$ROOT/data/platform-settings-state.json"
 PREVIOUS_ENV="$ROOT/data/platform-settings-previous.env"
