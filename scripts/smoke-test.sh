@@ -66,10 +66,21 @@ wait_command() {
 cd "$(dirname "$0")/.."
 
 cleanup() {
+  set +e
   docker ps -aq --filter label=myrailway.service | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker ps -aq --filter label=myrailway.database | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker volume ls -q --filter name=mr-db- | xargs -r docker volume rm -f >/dev/null 2>&1 || true
+
+  # Platform settings are intentionally written by the root-running updater as mode 0600.
+  # Restore CI workspace ownership before invoking host-side compose/down or the next test.
+  if [ -e .env ] || [ -e data/platform-settings-state.json ] || [ -e data/platform-settings-previous.env ]; then
+    docker run --rm -v "$PWD:/workspace" alpine:3.20 sh -lc \
+      "chown -R $(id -u):$(id -g) /workspace/.env /workspace/data 2>/dev/null || true; chmod 600 /workspace/.env 2>/dev/null || true" \
+      >/dev/null 2>&1 || true
+  fi
+
   docker compose down -v --remove-orphans >/dev/null 2>&1 || true
+  rm -f .env data/platform-settings-previous.env >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
