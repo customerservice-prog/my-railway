@@ -1005,7 +1005,7 @@ app.patch("/api/services/:id", auth, async (req: AuthedRequest, res) => {
     sets.push(`${mapping[key]}=$${values.length}`);
   }
   values.push(String(req.params.id));
-  const idPlaceholder = `${values.length}`;
+  const idPlaceholder = "$" + values.length;
   const result = await pool.query(
     `UPDATE services SET ${sets.join(",")}, updated_at=now() WHERE id=${idPlaceholder} RETURNING *`,
     values
