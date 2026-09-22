@@ -597,6 +597,77 @@ wait_command "$DATABASE_COMMAND" "managed Redis permanent deletion"
 curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/databases > /tmp/databases.json
 node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/databases.json","utf8"));if(x.some(d=>d.id===id))process.exit(1)' "$DATABASE_ID"
 
+checkpoint "dashboard-managed platform settings"
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/platform-settings-before.json -w '%{http_code}' http://127.0.0.1:8080/api/platform/settings)"
+expect_status "$STATUS" "200" "read platform settings" /tmp/platform-settings-before.json
+node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/platform-settings-before.json","utf8"));if(!x.settings||x.settings.GITHUB_APP_PRIVATE_KEY_BASE64!==undefined)process.exit(1)'
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/platform-settings-apply.json -w '%{http_code}'   -H 'content-type: application/json'   -d '{"settings":{"ALERT_WEBHOOK_URL":"https://example.invalid/my-railway-ci","AUTO_BACKUPS":false,"AUTO_PREDEPLOY_BACKUPS":true,"AUTO_ROLLBACK":false},"clearKeys":[]}'   http://127.0.0.1:8080/api/platform/settings)"
+expect_status "$STATUS" "202" "queue platform settings apply" /tmp/platform-settings-apply.json
+
+SETTINGS_APPLIED=false
+for _ in $(seq 1 180); do
+  if curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/platform/settings > /tmp/platform-settings-after.json 2>/dev/null; then
+    APPLY_STATE="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/platform-settings-after.json","utf8"));process.stdout.write(x.apply?.status||"unknown")')"
+    if [ "$APPLY_STATE" = "completed" ]; then
+      SETTINGS_APPLIED=true
+      break
+    fi
+    if [ "$APPLY_STATE" = "failed" ]; then
+      cat /tmp/platform-settings-after.json >&2
+      exit 1
+    fi
+  fi
+  sleep 2
+done
+test "$SETTINGS_APPLIED" = true
+
+# The host file, reloaded control plane, and restarted updater must all reflect the saved settings.
+grep -q '^ALERT_WEBHOOK_URL=https://example.invalid/my-railway-ci
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/project-delete.json -w '%{http_code}' -X DELETE "http://127.0.0.1:8080/api/projects/$PROJECT_ID")"
+expect_status "$STATUS" "200" "delete project after stateful resources are removed" /tmp/project-delete.json
+
+STATUS="$(curl -sS -o /tmp/webhook.json -w '%{http_code}'   -H 'content-type: application/json'   -H 'x-github-delivery: ci-invalid'   -H 'x-github-event: push'   -H 'x-hub-signature-256: sha256=invalid'   -d '{"ref":"refs/heads/main"}'   http://127.0.0.1:8080/api/webhooks/github)"
+expect_status "$STATUS" "401" "invalid webhook signature rejected" /tmp/webhook.json
+
+curl -sSI http://127.0.0.1:8080/ | tr -d '\r' > /tmp/headers.txt
+grep -qi '^x-frame-options: DENY$' /tmp/headers.txt
+grep -qi '^x-content-type-options: nosniff$' /tmp/headers.txt
+grep -qi '^content-security-policy:' /tmp/headers.txt
+
+echo "My Railway smoke test passed."
+ .env
+grep -q '^AUTO_BACKUPS=false
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/project-delete.json -w '%{http_code}' -X DELETE "http://127.0.0.1:8080/api/projects/$PROJECT_ID")"
+expect_status "$STATUS" "200" "delete project after stateful resources are removed" /tmp/project-delete.json
+
+STATUS="$(curl -sS -o /tmp/webhook.json -w '%{http_code}'   -H 'content-type: application/json'   -H 'x-github-delivery: ci-invalid'   -H 'x-github-event: push'   -H 'x-hub-signature-256: sha256=invalid'   -d '{"ref":"refs/heads/main"}'   http://127.0.0.1:8080/api/webhooks/github)"
+expect_status "$STATUS" "401" "invalid webhook signature rejected" /tmp/webhook.json
+
+curl -sSI http://127.0.0.1:8080/ | tr -d '\r' > /tmp/headers.txt
+grep -qi '^x-frame-options: DENY$' /tmp/headers.txt
+grep -qi '^x-content-type-options: nosniff$' /tmp/headers.txt
+grep -qi '^content-security-policy:' /tmp/headers.txt
+
+echo "My Railway smoke test passed."
+ .env
+node - <<'NODE'
+const fs=require("fs");
+const x=JSON.parse(fs.readFileSync("/tmp/platform-settings-after.json","utf8"));
+if(x.settings.ALERT_WEBHOOK_URL!=="https://example.invalid/my-railway-ci") process.exit(1);
+if(x.settings.AUTO_BACKUPS!==false) process.exit(1);
+if(x.settings.AUTO_PREDEPLOY_BACKUPS!==true) process.exit(1);
+NODE
+
+for _ in $(seq 1 60); do
+  if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 &&      curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/platform/update/info >/tmp/updater-after-settings.json 2>/dev/null; then
+    break
+  fi
+  sleep 2
+done
+curl -fsS http://127.0.0.1:8080/healthz >/dev/null
+curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/platform/update/info >/tmp/updater-after-settings.json
+
 checkpoint "stateless project deletion"
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/project-delete.json -w '%{http_code}' -X DELETE "http://127.0.0.1:8080/api/projects/$PROJECT_ID")"
 expect_status "$STATUS" "200" "delete project after stateful resources are removed" /tmp/project-delete.json
