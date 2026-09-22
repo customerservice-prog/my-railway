@@ -39,7 +39,7 @@ export async function activateRoute(serviceId: string, containerName: string, po
     }
   };
   const temp = target + ".tmp";
-  await fs.writeFile(temp, YAML.stringify(document), { mode: 0o600 });
+  await fs.writeFile(temp, YAML.stringify(document), { mode: 0o644 });
   await fs.rename(temp, target);
 }
 
