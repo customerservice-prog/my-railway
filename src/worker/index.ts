@@ -117,6 +117,9 @@ async function buildImage(dep: Deployment): Promise<{image:string;runtimePort:nu
       "build",
       "--file", prepared.dockerfile,
       "--tag", image,
+      "--label", "myrailway.managed=true",
+      "--label", `myrailway.service=${dep.service_id}`,
+      "--label", `myrailway.deployment=${dep.id}`,
       "."
     ], workdir, (line)=>log(dep.id,line), { DOCKER_BUILDKIT: "1" });
 
