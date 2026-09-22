@@ -96,16 +96,28 @@ function sameOriginMutation(req: Request): boolean {
   }
 }
 
-function signSession(userId: string) {
-  return jwt.sign({ sub: userId }, sessionSecret, { expiresIn: "12h", issuer: "my-railway" });
+function signSession(userId: string, sessionVersion: number) {
+  return jwt.sign(
+    { sub: userId, sv: sessionVersion },
+    sessionSecret,
+    { expiresIn: "12h", issuer: "my-railway" }
+  );
 }
 
-function auth(req: AuthedRequest, res: Response, next: NextFunction) {
+async function auth(req: AuthedRequest, res: Response, next: NextFunction) {
   const token = req.cookies?.mr_session;
   if (!token) return res.status(401).json({ error: "authentication required" });
   try {
     const payload = jwt.verify(token, sessionSecret, { issuer: "my-railway" }) as jwt.JwtPayload;
-    req.userId = String(payload.sub);
+    const userId = String(payload.sub ?? "");
+    const user = await one<{session_version:number}>(
+      "SELECT session_version FROM users WHERE id=$1",
+      [userId]
+    );
+    if (!user || Number(payload.sv ?? 0) !== Number(user.session_version)) {
+      return res.status(401).json({ error: "session expired or revoked" });
+    }
+    req.userId = userId;
     if (!sameOriginMutation(req)) {
       return res.status(403).json({ error: "cross-site state-changing request rejected" });
     }
@@ -606,7 +618,7 @@ app.post("/api/auth/login", async (req, res) => {
   }
   loginAttempts.delete(loginKey);
   await pool.query("UPDATE users SET last_login_at=now() WHERE id=$1", [user.id]);
-  res.cookie("mr_session", signSession(user.id), {
+  res.cookie("mr_session", signSession(user.id, Number(user.session_version ?? 1)), {
     httpOnly: true,
     sameSite: "strict",
     secure: cookieSecure,
@@ -615,6 +627,72 @@ app.post("/api/auth/login", async (req, res) => {
   });
   await audit(user.email, usedRecoveryCode ? "auth.login.recovery_code" : "auth.login", "user", user.id);
   res.json({ user: safeUser(user), usedRecoveryCode });
+});
+
+app.post("/api/auth/password", auth, async (req: AuthedRequest, res) => {
+  const parsed = z.object({
+    currentPassword: z.string().min(1),
+    newPassword: z.string().min(12),
+    totp: z.string().optional()
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "current password and a new password of at least 12 characters are required" });
+
+  const user = await one<any>("SELECT * FROM users WHERE id=$1", [req.userId]);
+  if (!user || !(await bcrypt.compare(parsed.data.currentPassword, user.password_hash))) {
+    return res.status(401).json({ error: "invalid current password" });
+  }
+  if (user.totp_enabled) {
+    if (!parsed.data.totp || !user.totp_secret_enc) return res.status(401).json({ error: "authenticator code required" });
+    const secret = decryptSecret(user.totp_secret_enc);
+    if (!authenticator.check(parsed.data.totp, secret)) return res.status(401).json({ error: "invalid authenticator code" });
+  }
+
+  const passwordHash = await bcrypt.hash(parsed.data.newPassword, 12);
+  const updated = await one<any>(
+    "UPDATE users SET password_hash=$2,session_version=session_version+1 WHERE id=$1 RETURNING session_version,email",
+    [user.id,passwordHash]
+  );
+  res.cookie("mr_session", signSession(user.id, Number(updated.session_version)), {
+    httpOnly:true,
+    sameSite:"strict",
+    secure:cookieSecure,
+    maxAge:12*60*60*1000,
+    path:"/"
+  });
+  await audit(updated.email,"auth.password.changed","user",user.id);
+  res.json({ ok:true });
+});
+
+app.post("/api/auth/sessions/revoke", auth, async (req: AuthedRequest, res) => {
+  const parsed = z.object({
+    password: z.string().min(1),
+    totp: z.string().optional()
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "password is required" });
+
+  const user = await one<any>("SELECT * FROM users WHERE id=$1", [req.userId]);
+  if (!user || !(await bcrypt.compare(parsed.data.password, user.password_hash))) {
+    return res.status(401).json({ error: "invalid password" });
+  }
+  if (user.totp_enabled) {
+    if (!parsed.data.totp || !user.totp_secret_enc) return res.status(401).json({ error: "authenticator code required" });
+    const secret = decryptSecret(user.totp_secret_enc);
+    if (!authenticator.check(parsed.data.totp, secret)) return res.status(401).json({ error: "invalid authenticator code" });
+  }
+
+  const updated = await one<any>(
+    "UPDATE users SET session_version=session_version+1 WHERE id=$1 RETURNING session_version,email",
+    [user.id]
+  );
+  res.cookie("mr_session", signSession(user.id, Number(updated.session_version)), {
+    httpOnly:true,
+    sameSite:"strict",
+    secure:cookieSecure,
+    maxAge:12*60*60*1000,
+    path:"/"
+  });
+  await audit(updated.email,"auth.sessions.revoked","user",user.id);
+  res.json({ ok:true });
 });
 
 app.post("/api/auth/logout", auth, async (req: AuthedRequest, res) => {
