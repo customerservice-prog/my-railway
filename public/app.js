@@ -579,6 +579,29 @@ async function openProject(id) {
     </div>
   `).join("") || '<div class="muted">No managed databases.</div>';
 
+  const cronRuns = (service.cron_runs || []).map((run) => `
+    <tr>
+      <td>${fmt(run.scheduled_for)}</td>
+      <td><span class="pill ${statusClass(run.status)}">${esc(run.status)}</span></td>
+      <td>${run.exit_code === null || run.exit_code === undefined ? "—" : esc(run.exit_code)}</td>
+      <td>${fmt(run.completed_at)}</td>
+      <td>${run.logs ? `<button data-cron-log="${esc(run.id)}">Logs</button>` : ""}</td>
+    </tr>
+  `).join("");
+
+  const cronSection = service.kind === "cron" ? `
+    <div class="section-head"><h3>Schedule</h3></div>
+    <div class="kv"><span class="muted">Expression</span><span class="mono">${esc(service.cron_expression || "—")}</span></div>
+    <div class="kv"><span class="muted">Timezone</span><span>${esc(service.cron_timezone || "UTC")}</span></div>
+    <div class="kv"><span class="muted">Next run</span><span>${fmt(service.next_cron_at)}</span></div>
+    <div class="row mt12"><button id="run-cron-now" class="primary">Run now</button></div>
+    <div class="section-head"><h3>Recent cron runs</h3></div>
+    <div class="panel"><table class="table">
+      <thead><tr><th>Scheduled</th><th>Status</th><th>Exit</th><th>Completed</th><th></th></tr></thead>
+      <tbody>${cronRuns || '<tr><td colspan="5" class="empty">No cron runs yet.</td></tr>'}</tbody>
+    </table></div>
+  ` : "";
+
   $("#project-detail").innerHTML = `
     <div class="detail-head">
       <div>
@@ -591,16 +614,17 @@ async function openProject(id) {
 
     <div class="section-head"><h3>Service controls</h3></div>
     <div class="row">
-      <button class="primary" id="deploy-now">Deploy now</button>
-      <button id="restart-service">Restart</button>
-      <button id="refresh-runtime-logs">Refresh live logs</button>
-      <button id="stop-service" class="danger">Stop</button>
+      <button class="primary" id="deploy-now">${service.kind === "cron" ? "Publish cron release" : "Deploy now"}</button>
+      ${service.kind === "cron" ? "" : '<button id="restart-service">Restart</button><button id="refresh-runtime-logs">Refresh live logs</button><button id="stop-service" class="danger">Stop</button>'}
     </div>
 
     <div class="section-head"><h3>Build & runtime</h3></div>
     <form id="service-settings" class="form-grid">
       <label>Branch<input name="branch" value="${esc(service.branch)}" required></label>
       <label>Root directory<input name="rootDirectory" value="${esc(service.root_directory || ".")}" required></label>
+      <label>Service type<select name="kind">
+        ${["web","worker","cron"].map((kind) => `<option value="${kind}" ${service.kind === kind ? "selected" : ""}>${kind}</option>`).join("")}
+      </select></label>
       <label>Build type<select name="buildType">
         ${["auto","docker","node","python","static"].map((type) => `<option value="${type}" ${service.build_type === type ? "selected" : ""}>${type}</option>`).join("")}
       </select></label>
@@ -611,6 +635,12 @@ async function openProject(id) {
       <label>Build command<input name="buildCommand" value="${esc(service.build_command || "")}" placeholder="auto"></label>
       <label>Start command<input name="startCommand" value="${esc(service.start_command || "")}" placeholder="auto"></label>
       <label>Pre-deploy / migration command<input name="predeployCommand" value="${esc(service.predeploy_command || "")}" placeholder="npx prisma migrate deploy"></label>
+      ${service.kind === "cron" ? `
+        <label>Cron expression<input name="cronExpression" value="${esc(service.cron_expression || "")}" placeholder="0 2 * * *" required></label>
+        <label>Cron timezone<input name="cronTimezone" value="${esc(service.cron_timezone || "UTC")}" placeholder="America/New_York" required></label>
+        <label>Cron command<input name="cronCommand" value="${esc(service.cron_command || "")}" placeholder="npm run nightly" required></label>
+        <label>Cron timeout seconds<input name="cronTimeoutSeconds" type="number" min="1" max="86400" value="${esc(service.cron_timeout_seconds || 900)}"></label>
+      ` : ""}
       <label><span>Automatic deploys</span><select name="autoDeploy"><option value="true" ${service.auto_deploy ? "selected" : ""}>Enabled</option><option value="false" ${!service.auto_deploy ? "selected" : ""}>Disabled</option></select></label>
       <div class="row align-end"><button class="primary" type="submit">Save settings</button></div>
     </form>
@@ -647,6 +677,8 @@ async function openProject(id) {
       <div class="row align-end"><button>Add database</button></div>
     </form>
 
+    ${cronSection}
+
     <div class="section-head"><h3>Deployment history</h3></div>
     ${deploymentTable(service.deployments.map((deployment) => ({ ...deployment, project_name: project.name, service_name: service.name })))}
   `;
@@ -663,7 +695,7 @@ async function openProject(id) {
     } catch (error) { alert(error.message); }
   };
 
-  $("#restart-service").onclick = async () => {
+  if ($("#restart-service")) $("#restart-service").onclick = async () => {
     try {
       const queued = await api(`/api/services/${service.id}/restart`, { method: "POST" });
       await pollCommand(queued.commandId);
@@ -671,7 +703,7 @@ async function openProject(id) {
     } catch (error) { alert(error.message); }
   };
 
-  $("#stop-service").onclick = async () => {
+  if ($("#stop-service")) $("#stop-service").onclick = async () => {
     if (!confirm("Stop this service and remove its public route?")) return;
     try {
       const queued = await api(`/api/services/${service.id}/stop`, { method: "POST" });
@@ -680,7 +712,7 @@ async function openProject(id) {
     } catch (error) { alert(error.message); }
   };
 
-  $("#refresh-runtime-logs").onclick = async () => {
+  if ($("#refresh-runtime-logs")) $("#refresh-runtime-logs").onclick = async () => {
     try {
       const queued = await api(`/api/services/${service.id}/logs/refresh`, { method: "POST" });
       await pollCommand(queued.commandId);
@@ -693,6 +725,7 @@ async function openProject(id) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const body = {
+      kind: String(form.get("kind")),
       branch: String(form.get("branch")),
       rootDirectory: String(form.get("rootDirectory")),
       buildType: String(form.get("buildType")),
@@ -705,6 +738,12 @@ async function openProject(id) {
       predeployCommand: String(form.get("predeployCommand") || "") || null,
       autoDeploy: String(form.get("autoDeploy")) === "true"
     };
+    if (service.kind === "cron" || body.kind === "cron") {
+      body.cronExpression = String(form.get("cronExpression") || "") || null;
+      body.cronTimezone = String(form.get("cronTimezone") || "UTC");
+      body.cronCommand = String(form.get("cronCommand") || "") || null;
+      body.cronTimeoutSeconds = Number(form.get("cronTimeoutSeconds") || 900);
+    }
     try {
       await api(`/api/services/${service.id}`, { method: "PATCH", body: JSON.stringify(body) });
       alert("Service settings saved.");
@@ -809,6 +848,20 @@ async function openProject(id) {
       alert(result.note || "Database removed.");
       openProject(id);
     } catch (error) { alert(error.message); }
+  });
+
+  if ($("#run-cron-now")) $("#run-cron-now").onclick = async () => {
+    try {
+      const queued = await api(`/api/services/${service.id}/cron/run`, { method:"POST" });
+      if (queued.commandId) await pollCommand(queued.commandId, 24 * 60 * 60_000);
+      openProject(id);
+    } catch (error) { alert(error.message); }
+  };
+
+  $("[data-cron-log]", dialog).forEach((button) => button.onclick = () => {
+    const run = (service.cron_runs || []).find((item) => item.id === button.dataset.cronLog);
+    if (!run) return;
+    showDialog(`Cron run ${run.id}`, `<div class="log">${esc(run.logs || "No output.")}</div>`);
   });
 
   wireDeployments(dialog);
