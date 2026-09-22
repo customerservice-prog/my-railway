@@ -1641,10 +1641,81 @@ app.post("/api/services/:id/volumes", auth, async (req: AuthedRequest, res) => {
 });
 
 app.delete("/api/volumes/:id", auth, async (req: AuthedRequest, res) => {
-  const volume = await one<any>("DELETE FROM volumes WHERE id=$1 RETURNING *", [String(req.params.id)]);
+  const volume = await one<any>("SELECT * FROM volumes WHERE id=$1", [String(req.params.id)]);
   if (!volume) return res.status(404).json({ error: "volume not found" });
-  await audit(req.userId ?? "unknown", "volume.detach", "volume", volume.id, { dockerVolumeName: volume.docker_volume_name });
-  res.json({ ok: true, note: "Volume metadata detached; Docker volume data was intentionally left intact." });
+  if (volume.status === "deleting") return res.status(409).json({ error: "volume deletion is already in progress" });
+
+  const deleteData = req.body?.confirm === "DELETE_DATA";
+  const active = await one<any>(`
+    SELECT server_id FROM deployments
+    WHERE service_id=$1 AND server_id IS NOT NULL
+    ORDER BY created_at DESC LIMIT 1
+  `, [volume.service_id]);
+
+  if (!active?.server_id) {
+    if (deleteData) {
+      await pool.query("DELETE FROM volumes WHERE id=$1", [volume.id]);
+      await audit(req.userId ?? "unknown","volume.delete.completed","volume",volume.id,{
+        deleteData:true,
+        runtimeCommand:false
+      });
+      return res.json({ ok:true, dataDeleted:true, note:"Volume metadata removed. No runtime placement existed, so there was no Docker-host cleanup to queue." });
+    }
+
+    await pool.query(
+      "UPDATE volumes SET status='detached',detached_at=now() WHERE id=$1",
+      [volume.id]
+    );
+    await audit(req.userId ?? "unknown","volume.detach.completed","volume",volume.id,{
+      deleteData:false,
+      runtimeCommand:false
+    });
+    return res.json({ ok:true, dataDeleted:false, note:"Volume retained in detached state. Reattach it before the next deployment if you want it mounted again." });
+  }
+
+  const commandId = await enqueueAgentCommand(active.server_id,"REMOVE_VOLUME",{
+    volumeId:volume.id,
+    serviceId:volume.service_id,
+    volumeName:volume.docker_volume_name,
+    deleteData
+  });
+  await pool.query(
+    "UPDATE volumes SET status='deleting' WHERE id=$1",
+    [volume.id]
+  );
+  await audit(req.userId ?? "unknown","volume.delete.requested","volume",volume.id,{
+    deleteData,
+    commandId
+  });
+  res.status(202).json({
+    commandId,
+    dataDeleted:deleteData,
+    note:deleteData
+      ? "Volume deletion is queued; metadata will be removed after the runtime confirms Docker-volume deletion."
+      : "Volume detach is queued; the service will stop and the Docker volume/data will be retained."
+  });
+});
+
+app.post("/api/volumes/:id/reattach", auth, async (req: AuthedRequest, res) => {
+  const volume = await one<any>("SELECT * FROM volumes WHERE id=$1", [String(req.params.id)]);
+  if (!volume) return res.status(404).json({ error: "volume not found" });
+  if (!["detached","delete_failed"].includes(volume.status)) {
+    return res.status(409).json({ error: "only a detached or failed-detach volume can be reattached" });
+  }
+
+  const updated = await one<any>(
+    "UPDATE volumes SET status='attached',detached_at=NULL WHERE id=$1 RETURNING *",
+    [volume.id]
+  );
+  await resolveAlert(`volume-delete:${volume.id}`);
+  await audit(req.userId ?? "unknown","volume.reattach","volume",volume.id,{
+    serviceId:volume.service_id,
+    mountPath:volume.mount_path
+  });
+  res.json({
+    volume:updated,
+    note:"Volume marked attached. Redeploy the service to mount it again."
+  });
 });
 
 app.post("/api/volumes/:id/backup", auth, async (req: AuthedRequest, res) => {
@@ -1656,10 +1727,10 @@ app.post("/api/volumes/:id/backup", auth, async (req: AuthedRequest, res) => {
   if (!volume) return res.status(404).json({ error: "volume not found" });
   const active = await one<any>(`
     SELECT server_id FROM deployments
-    WHERE service_id=$1 AND server_id IS NOT NULL AND status='RUNNING'
-    ORDER BY completed_at DESC NULLS LAST, created_at DESC LIMIT 1
+    WHERE service_id=$1 AND server_id IS NOT NULL
+    ORDER BY created_at DESC LIMIT 1
   `, [volume.service_id]);
-  if (!active?.server_id) return res.status(409).json({ error: "no active runtime server for this service" });
+  if (!active?.server_id) return res.status(409).json({ error: "no runtime placement exists for this service" });
   const backupId = id("bak");
   await pool.query(
     "INSERT INTO backups(id,service_id,volume_id,server_id,kind,status) VALUES($1,$2,$3,$4,'volume','queued')",
