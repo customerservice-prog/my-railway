@@ -18,6 +18,8 @@ test("data-action button groups use querySelectorAll helper", () => {
     "data-verify-domain",
     "data-delete-domain",
     "data-backup-volume",
+    "data-delete-volume",
+    "data-reattach-volume",
     "data-project-db-backup",
     "data-project-db-reattach",
     "data-project-db-delete",
