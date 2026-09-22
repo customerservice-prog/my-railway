@@ -39,6 +39,11 @@ Do not migrate a critical application until this checklist is completed on the a
 - [ ] First administrator exists.
 - [ ] Strong password is used.
 - [ ] TOTP is enabled.
+- [ ] Recovery codes are saved in a separate protected location.
+- [ ] One recovery-code login is tested and the code cannot be reused.
+- [ ] Recovery-code regeneration invalidates the previous set.
+- [ ] Password change invalidates older sessions.
+- [ ] Session revoke invalidates an older browser session.
 - [ ] Login succeeds with TOTP.
 - [ ] Login without TOTP fails after 2FA enablement.
 - [ ] Repeated invalid password attempts trigger throttling.
@@ -349,3 +354,14 @@ These are intentionally **not** required for private v1, but are mandatory befor
 - [ ] Removing a domain removes it from the live route without requiring a full redeploy.
 - [ ] Managed database can be removed while retaining data.
 - [ ] Managed database data volume is deleted only with explicit destructive confirmation.
+
+
+## Retention and disk growth
+
+- [ ] Retention settings are reviewed for the host's disk size.
+- [ ] Old completed agent commands disappear after COMMAND_RETENTION_DAYS.
+- [ ] Old deployment logs disappear after LOG_RETENTION_DAYS.
+- [ ] Old local backup files are physically deleted after BACKUP_RETENTION_DAYS.
+- [ ] Unused labeled My Railway release images are removed after IMAGE_RETENTION_HOURS.
+- [ ] Running/current application images are not pruned.
+- [ ] A retained rollback image remains available inside the intended retention window.
