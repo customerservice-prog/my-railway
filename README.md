@@ -428,6 +428,15 @@ Use a repository on a different machine/provider. A backup stored only on the sa
 
 Test restore paths from the **Backups** screen.
 
+Recovery paths are exercised destructively in CI:
+
+- persistent-volume data is changed, restored, and verified;
+- Redis data is changed, restored from its snapshot, converted into a fresh AOF, restarted, and verified;
+- PostgreSQL data is changed, restored from a custom-format dump, and verified;
+- the My Railway control-plane dump is restored into a fresh PostgreSQL database and checked for users, projects, and migration history.
+
+Platform backup checksum files use portable relative filenames so the backup can be moved to another host or recovery directory and still verify correctly.
+
 ## Monitoring and alerts
 
 The runtime agent reports:
