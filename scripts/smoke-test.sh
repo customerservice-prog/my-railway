@@ -205,9 +205,10 @@ MAINT_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse
 wait_command "$MAINT_COMMAND" "enable maintenance"
 MAINT_CONTAINER="$(docker ps --filter "label=myrailway.maintenance.service=$SERVICE_ID" --format '{{.Names}}' | head -1)"
 test -n "$MAINT_CONTAINER"
-STATUS="$(docker run --rm --network myrailway curlimages/curl:8.10.1 -sS -o /tmp/maint-body.txt -w '%{http_code}' "http://$MAINT_CONTAINER:3000/")"
-expect_status "$STATUS" "503" "maintenance responder status" /tmp/maint-body.txt
-grep -q 'Smoke maintenance' /tmp/maint-body.txt
+STATUS="$(docker run --rm --network myrailway curlimages/curl:8.10.1 -sS -o /dev/null -w '%{http_code}' "http://$MAINT_CONTAINER:3000/")"
+expect_status "$STATUS" "503" "maintenance responder status"
+MAINT_BODY="$(docker run --rm --network myrailway curlimages/curl:8.10.1 -sS "http://$MAINT_CONTAINER:3000/")"
+printf '%s' "$MAINT_BODY" | grep -q 'Smoke maintenance'
 
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/maintenance-disable.json -w '%{http_code}' -H 'content-type: application/json' -d '{"enabled":false}' "http://127.0.0.1:8080/api/services/$SERVICE_ID/maintenance")"
 expect_status "$STATUS" "202" "disable maintenance" /tmp/maintenance-disable.json
