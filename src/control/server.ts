@@ -10,7 +10,7 @@ import { z } from "zod";
 import { pool, one, query, ensureSchema } from "../shared/db.js";
 import { encryptSecret, decryptSecret } from "../shared/crypto.js";
 import { env, optionalEnv, boolEnv } from "../shared/env.js";
-import { enqueueDeployment } from "../shared/queue.js";
+import { deploymentQueue, enqueueDeployment } from "../shared/queue.js";
 import { id, slug } from "../shared/util.js";
 
 const app = express();
@@ -567,6 +567,25 @@ app.get("/api/deployments", auth, async (_req, res) => {
   res.json(rows);
 });
 
+app.post("/api/deployments/:id/cancel", auth, async (req: AuthedRequest, res) => {
+  const deploymentId = String(req.params.id);
+  const deployment = await one<any>("SELECT * FROM deployments WHERE id=$1", [deploymentId]);
+  if (!deployment) return res.status(404).json({ error: "deployment not found" });
+  if (deployment.status !== "QUEUED") {
+    return res.status(409).json({ error: "only queued deployments can be cancelled safely; stop the service separately if needed" });
+  }
+
+  const job = await deploymentQueue.getJob(deploymentId);
+  if (job) await job.remove().catch(() => {});
+
+  await pool.query(
+    "UPDATE deployments SET status='CANCELLED',failure_reason='Cancelled by operator',completed_at=now() WHERE id=$1 AND status='QUEUED'",
+    [deploymentId]
+  );
+  await audit(req.userId ?? "unknown", "deployment.cancel", "deployment", deploymentId);
+  res.json({ ok:true });
+});
+
 app.get("/api/deployments/:id/logs", auth, async (req, res) => {
   const after = Number(req.query.after ?? 0);
   const rows = await query("SELECT * FROM deployment_logs WHERE deployment_id=$1 AND id>$2 ORDER BY id LIMIT 1000", [String(req.params.id), after]);
@@ -634,6 +653,37 @@ app.post("/api/domains/:id/verify", auth, async (req, res) => {
     [verified, verified ? null : "DNS does not point at this platform", domain.id]
   );
   res.status(verified ? 200 : 409).json({ verified, evidence, expectedIp, expectedHost });
+});
+
+app.delete("/api/domains/:id", auth, async (req: AuthedRequest, res) => {
+  const domain = await one<any>("SELECT * FROM domains WHERE id=$1", [String(req.params.id)]);
+  if (!domain) return res.status(404).json({ error: "domain not found" });
+
+  await pool.query("DELETE FROM domains WHERE id=$1", [domain.id]);
+
+  const active = await one<any>(`
+    SELECT id,server_id FROM deployments
+    WHERE service_id=$1 AND server_id IS NOT NULL AND status='RUNNING'
+    ORDER BY created_at DESC LIMIT 1
+  `, [domain.service_id]);
+
+  let commandId: string | null = null;
+  if (active?.server_id) {
+    const domains = await query<{hostname:string}>(
+      "SELECT hostname FROM domains WHERE service_id=$1 AND verified=true ORDER BY hostname",
+      [domain.service_id]
+    );
+    commandId = await enqueueAgentCommand(active.server_id, "REFRESH_ROUTE", {
+      serviceId: domain.service_id,
+      domains: domains.map((item) => item.hostname)
+    }, active.id);
+  }
+
+  await audit(req.userId ?? "unknown", "domain.delete", "domain", domain.id, {
+    hostname: domain.hostname,
+    serviceId: domain.service_id
+  });
+  res.status(commandId ? 202 : 200).json({ ok:true, commandId });
 });
 
 app.get("/api/servers", auth, async (_req, res) => {
