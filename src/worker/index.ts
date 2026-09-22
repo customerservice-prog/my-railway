@@ -4,7 +4,7 @@ import path from "node:path";
 import { Worker } from "bullmq";
 import { pool, one, query } from "../shared/db.js";
 import { redis } from "../shared/queue.js";
-import { decryptSecret } from "../shared/crypto.js";
+import { decryptSecret, encryptSecret } from "../shared/crypto.js";
 import { env, optionalEnv } from "../shared/env.js";
 import { id, safeContainerName, sleep } from "../shared/util.js";
 import { prepareDockerfile, run } from "./build.js";
@@ -208,8 +208,8 @@ async function processDeployment(deploymentId: string) {
 
     await status(dep.id, "PROVISIONING");
     await pool.query(
-      "INSERT INTO agent_commands(id,server_id,deployment_id,action,payload) VALUES($1,$2,$3,'DEPLOY',$4)",
-      [commandId, server.id, dep.id, JSON.stringify(payload)]
+      "INSERT INTO agent_commands(id,server_id,deployment_id,action,payload,payload_enc) VALUES($1,$2,$3,'DEPLOY','{}'::jsonb,$4)",
+      [commandId, server.id, dep.id, encryptSecret(JSON.stringify(payload))]
     );
     await log(dep.id, `Assigned to runtime ${server.name} (${server.id})`);
     await waitForCommand(commandId, dep.id);
