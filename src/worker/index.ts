@@ -16,7 +16,7 @@ type Deployment = {
   service_name: string; repo_full_name: string; branch: string; root_directory: string;
   build_type: "auto"|"docker"|"node"|"python"|"static"; dockerfile_path: string;
   build_command: string|null; start_command: string|null; predeploy_command: string|null;
-  internal_port: number; health_path: string; cpu_limit: string|number; memory_mb: number; kind: "web"|"worker";
+  internal_port: number; health_path: string; cpu_limit: string|number; memory_mb: number; kind: "web"|"worker"|"cron";
   runtime_port: number|null; detected_build_type: string|null;
 };
 
@@ -221,6 +221,16 @@ async function processDeployment(deploymentId: string) {
     const server = await chooseServer(dep.memory_mb);
     if (!server) throw new Error(`No healthy runtime server has at least ${dep.memory_mb} MB free`);
     await pool.query("UPDATE deployments SET server_id=$2 WHERE id=$1", [dep.id, server.id]);
+
+    if (dep.kind === "cron") {
+      await pool.query(
+        "UPDATE deployments SET status='SUPERSEDED' WHERE service_id=$1 AND id<>$2 AND status='RUNNING'",
+        [dep.service_id, dep.id]
+      );
+      await status(dep.id, "RUNNING");
+      await log(dep.id, "Cron release published. Scheduled runs will execute this immutable image as one-off containers.");
+      return;
+    }
 
     const vars = await query<any>("SELECT key,value_enc FROM variables WHERE service_id=$1", [dep.service_id]);
     const environment: Record<string,string> = {};
