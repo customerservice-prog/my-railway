@@ -629,6 +629,9 @@ app.get("/api/projects/:id", auth, async (req, res) => {
     service.variables = await query("SELECT id,key,is_secret,created_at,updated_at FROM variables WHERE service_id=$1 ORDER BY key", [service.id]);
     service.volumes = await query("SELECT * FROM volumes WHERE service_id=$1 ORDER BY created_at", [service.id]);
     service.deployments = await query("SELECT * FROM deployments WHERE service_id=$1 ORDER BY created_at DESC LIMIT 30", [service.id]);
+    service.cron_runs = service.kind === "cron"
+      ? await query("SELECT * FROM cron_runs WHERE service_id=$1 ORDER BY scheduled_for DESC LIMIT 50", [service.id])
+      : [];
   }
   const databases = await query(`
     SELECT id,project_id,service_id,kind,name,docker_name,volume_name,server_id,username,database_name,variable_key,status,created_at,updated_at
@@ -795,6 +798,28 @@ app.post("/api/deployments/:id/cancel", auth, async (req: AuthedRequest, res) =>
   );
   await audit(req.userId ?? "unknown", "deployment.cancel", "deployment", deploymentId);
   res.json({ ok:true });
+});
+
+app.get("/api/services/:id/cron-runs", auth, async (req, res) => {
+  const serviceId=String(req.params.id);
+  const service=await one<any>("SELECT id,kind FROM services WHERE id=$1",[serviceId]);
+  if(!service) return res.status(404).json({error:"service not found"});
+  if(service.kind!=="cron") return res.status(409).json({error:"service is not a cron service"});
+  res.json(await query(
+    "SELECT * FROM cron_runs WHERE service_id=$1 ORDER BY scheduled_for DESC LIMIT 200",
+    [serviceId]
+  ));
+});
+
+app.post("/api/services/:id/cron/run", auth, async (req: AuthedRequest, res) => {
+  const service=await one<any>("SELECT * FROM services WHERE id=$1",[String(req.params.id)]);
+  if(!service) return res.status(404).json({error:"service not found"});
+  if(service.kind!=="cron") return res.status(409).json({error:"service is not a cron service"});
+  if(!service.cron_command) return res.status(409).json({error:"cron command is not configured"});
+  const queued=await queueCronRun(service,new Date(),"manual");
+  if(!queued) return res.status(409).json({error:"duplicate cron run timestamp"});
+  await audit(req.userId ?? "unknown","cron.run.manual","service",service.id,{runId:queued.runId});
+  res.status(202).json(queued);
 });
 
 app.get("/api/deployments/:id/logs", auth, async (req, res) => {
@@ -1495,6 +1520,35 @@ app.post("/api/internal/agent/commands/:id/complete", agentAuth, async (req, res
       [command.deployment_id, `[runtime ${result.containerName ?? "container"}]\n${text}`]
     );
   }
+  if (command.action === "RUN_CRON" && commandPayload?.runId) {
+    const exitCode = typeof result.exitCode === "number" ? result.exitCode : (status === "completed" ? 0 : 1);
+    const runStatus = status === "completed" && exitCode === 0 ? "completed" : "failed";
+    const logs = await redactServiceSecrets(
+      commandPayload.serviceId,
+      String(result.logs ?? result.error ?? "").slice(-1_000_000)
+    );
+    await pool.query(
+      `UPDATE cron_runs SET status=$2,exit_code=$3,logs=$4,
+       started_at=COALESCE(started_at,now()),completed_at=now()
+       WHERE id=$1`,
+      [commandPayload.runId,runStatus,exitCode,logs]
+    );
+    const fingerprint=`cron:${commandPayload.serviceId}`;
+    if(runStatus==="completed"){
+      await resolveAlert(fingerprint);
+      await resolveAlert(`cron-scheduler:${commandPayload.serviceId}`);
+    }else{
+      await openAlert({
+        severity:"critical",
+        type:"cron",
+        fingerprint,
+        title:`Cron run failed: ${commandPayload.serviceId}`,
+        message:result.timedOut ? "Cron run exceeded its timeout." : `Cron command exited with code ${exitCode}.`,
+        targetType:"service",
+        targetId:commandPayload.serviceId
+      });
+    }
+  }
   res.json({ ok: true });
 });
 
@@ -1518,6 +1572,9 @@ async function start() {
     setTimeout(() => void runAutomaticBackups().catch((error)=>console.error("Automatic backup sweep failed:",error)), 60_000).unref();
     setInterval(() => void runAutomaticBackups().catch((error)=>console.error("Automatic backup sweep failed:",error)), 60*60_000).unref();
   }
+
+  setTimeout(() => void runCronSweep().catch((error)=>console.error("Cron sweep failed:",error)), 5_000).unref();
+  setInterval(() => void runCronSweep().catch((error)=>console.error("Cron sweep failed:",error)), 30_000).unref();
 
   setInterval(async () => {
     try {
