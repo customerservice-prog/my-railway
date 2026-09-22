@@ -377,6 +377,27 @@ VOLUME_NAME="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSyn
 docker volume create "$VOLUME_NAME" >/dev/null
 docker run --rm -v "$VOLUME_NAME:/data" alpine:3.20 sh -lc 'echo retained >/data/proof.txt'
 
+checkpoint "persistent volume backup and destructive restore"
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/volume-backup.json -w '%{http_code}'   -H 'content-type: application/json' -d '{}'   "http://127.0.0.1:8080/api/volumes/$VOLUME_ID/backup")"
+expect_status "$STATUS" "202" "queue persistent volume backup" /tmp/volume-backup.json
+VOLUME_BACKUP_ID="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/volume-backup.json","utf8"));process.stdout.write(x.backupId)')"
+VOLUME_COMMAND="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/volume-backup.json","utf8"));process.stdout.write(x.commandId)')"
+wait_command "$VOLUME_COMMAND" "persistent volume backup"
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/volume-backup-test.json -w '%{http_code}'   -H 'content-type: application/json' -d '{}'   "http://127.0.0.1:8080/api/backups/$VOLUME_BACKUP_ID/test")"
+expect_status "$STATUS" "202" "queue persistent volume backup validation" /tmp/volume-backup-test.json
+VOLUME_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/volume-backup-test.json","utf8")).commandId)')"
+wait_command "$VOLUME_COMMAND" "persistent volume backup validation"
+
+docker run --rm -v "$VOLUME_NAME:/data" alpine:3.20 sh -lc 'echo corrupted >/data/proof.txt'
+docker run --rm -v "$VOLUME_NAME:/data:ro" alpine:3.20 grep -q corrupted /data/proof.txt
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/volume-restore.json -w '%{http_code}'   -H 'content-type: application/json' -d '{"confirm":"RESTORE"}'   "http://127.0.0.1:8080/api/backups/$VOLUME_BACKUP_ID/restore")"
+expect_status "$STATUS" "202" "queue persistent volume destructive restore" /tmp/volume-restore.json
+VOLUME_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/volume-restore.json","utf8")).commandId)')"
+wait_command "$VOLUME_COMMAND" "persistent volume destructive restore"
+docker run --rm -v "$VOLUME_NAME:/data:ro" alpine:3.20 grep -q retained /data/proof.txt
+
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/volume-detach.json -w '%{http_code}' -X DELETE -H 'content-type: application/json' -d '{"confirm":"KEEP_DATA"}' "http://127.0.0.1:8080/api/volumes/$VOLUME_ID")"
 expect_status "$STATUS" "202" "queue persistent volume detach" /tmp/volume-detach.json
 VOLUME_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/volume-detach.json","utf8")).commandId)')"
@@ -429,6 +450,32 @@ wait_command "$DATABASE_COMMAND" "managed Redis provision"
 curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/databases > /tmp/databases.json
 node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/databases.json","utf8")).find(d=>d.id===id);if(!x||x.status!=="running")process.exit(1)' "$DATABASE_ID"
 
+checkpoint "managed Redis backup and destructive restore"
+curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/databases > /tmp/databases.json
+REDIS_DOCKER_NAME="$(node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/databases.json","utf8")).find(d=>d.id===id);process.stdout.write(x.docker_name)' "$DATABASE_ID")"
+docker exec "$REDIS_DOCKER_NAME" sh -lc 'redis-cli -a "$REDIS_PASSWORD" SET myrailway_restore_key before >/dev/null'
+docker exec "$REDIS_DOCKER_NAME" sh -lc 'test "$(redis-cli -a "$REDIS_PASSWORD" GET myrailway_restore_key 2>/dev/null)" = before'
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/redis-backup.json -w '%{http_code}'   -H 'content-type: application/json' -d '{}'   "http://127.0.0.1:8080/api/databases/$DATABASE_ID/backup")"
+expect_status "$STATUS" "202" "queue Redis backup" /tmp/redis-backup.json
+REDIS_BACKUP_ID="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/redis-backup.json","utf8"));process.stdout.write(x.backupId)')"
+DATABASE_COMMAND="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/redis-backup.json","utf8"));process.stdout.write(x.commandId)')"
+wait_command "$DATABASE_COMMAND" "Redis backup"
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/redis-backup-test.json -w '%{http_code}'   -H 'content-type: application/json' -d '{}'   "http://127.0.0.1:8080/api/backups/$REDIS_BACKUP_ID/test")"
+expect_status "$STATUS" "202" "queue Redis backup validation" /tmp/redis-backup-test.json
+DATABASE_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/redis-backup-test.json","utf8")).commandId)')"
+wait_command "$DATABASE_COMMAND" "Redis backup validation"
+
+docker exec "$REDIS_DOCKER_NAME" sh -lc 'redis-cli -a "$REDIS_PASSWORD" SET myrailway_restore_key after >/dev/null'
+docker exec "$REDIS_DOCKER_NAME" sh -lc 'test "$(redis-cli -a "$REDIS_PASSWORD" GET myrailway_restore_key 2>/dev/null)" = after'
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/redis-restore.json -w '%{http_code}'   -H 'content-type: application/json' -d '{"confirm":"RESTORE_DATABASE"}'   "http://127.0.0.1:8080/api/backups/$REDIS_BACKUP_ID/restore-database")"
+expect_status "$STATUS" "202" "queue Redis destructive restore" /tmp/redis-restore.json
+DATABASE_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/redis-restore.json","utf8")).commandId)')"
+wait_command "$DATABASE_COMMAND" "Redis destructive restore"
+docker exec "$REDIS_DOCKER_NAME" sh -lc 'test "$(redis-cli -a "$REDIS_PASSWORD" GET myrailway_restore_key 2>/dev/null)" = before'
+
 checkpoint "stateful project deletion guard"
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/project-delete-blocked.json -w '%{http_code}' -X DELETE "http://127.0.0.1:8080/api/projects/$PROJECT_ID")"
 expect_status "$STATUS" "409" "block project deletion while managed database exists" /tmp/project-delete-blocked.json
@@ -449,6 +496,45 @@ DATABASE_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.pa
 wait_command "$DATABASE_COMMAND" "managed Redis reattach"
 curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/databases > /tmp/databases.json
 node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/databases.json","utf8")).find(d=>d.id===id);if(!x||x.status!=="running")process.exit(1)' "$DATABASE_ID"
+
+checkpoint "managed PostgreSQL provision, backup, and destructive restore"
+node -e 'require("fs").writeFileSync("/tmp/postgres-create.json",JSON.stringify({kind:"postgres",name:"Smoke Postgres",serviceId:process.argv[1],variableKey:"SMOKE_DATABASE_URL"}))' "$SERVICE_ID"
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/postgres-create-response.json -w '%{http_code}'   -H 'content-type: application/json' --data-binary @/tmp/postgres-create.json   "http://127.0.0.1:8080/api/projects/$PROJECT_ID/databases")"
+expect_status "$STATUS" "202" "queue managed PostgreSQL provision" /tmp/postgres-create-response.json
+POSTGRES_RESOURCE_ID="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/postgres-create-response.json","utf8"));process.stdout.write(x.databaseId)')"
+DATABASE_COMMAND="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/postgres-create-response.json","utf8"));process.stdout.write(x.commandId)')"
+wait_command "$DATABASE_COMMAND" "managed PostgreSQL provision"
+
+curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/databases > /tmp/databases.json
+POSTGRES_DOCKER_NAME="$(node -e 'const fs=require("fs");const id=process.argv[1];const x=JSON.parse(fs.readFileSync("/tmp/databases.json","utf8")).find(d=>d.id===id);if(!x||x.status!=="running")process.exit(1);process.stdout.write(x.docker_name)' "$POSTGRES_RESOURCE_ID")"
+
+docker exec "$POSTGRES_DOCKER_NAME" sh -lc 'PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "CREATE TABLE restore_probe(value text NOT NULL); INSERT INTO restore_probe(value) VALUES (''before'');" >/dev/null'
+docker exec "$POSTGRES_DOCKER_NAME" sh -lc 'test "$(PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atqc "SELECT value FROM restore_probe LIMIT 1")" = before'
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/postgres-backup.json -w '%{http_code}'   -H 'content-type: application/json' -d '{}'   "http://127.0.0.1:8080/api/databases/$POSTGRES_RESOURCE_ID/backup")"
+expect_status "$STATUS" "202" "queue PostgreSQL backup" /tmp/postgres-backup.json
+POSTGRES_BACKUP_ID="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/postgres-backup.json","utf8"));process.stdout.write(x.backupId)')"
+DATABASE_COMMAND="$(node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync("/tmp/postgres-backup.json","utf8"));process.stdout.write(x.commandId)')"
+wait_command "$DATABASE_COMMAND" "PostgreSQL backup"
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/postgres-backup-test.json -w '%{http_code}'   -H 'content-type: application/json' -d '{}'   "http://127.0.0.1:8080/api/backups/$POSTGRES_BACKUP_ID/test")"
+expect_status "$STATUS" "202" "queue PostgreSQL backup validation" /tmp/postgres-backup-test.json
+DATABASE_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/postgres-backup-test.json","utf8")).commandId)')"
+wait_command "$DATABASE_COMMAND" "PostgreSQL backup validation"
+
+docker exec "$POSTGRES_DOCKER_NAME" sh -lc 'PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "UPDATE restore_probe SET value=''after'';" >/dev/null'
+docker exec "$POSTGRES_DOCKER_NAME" sh -lc 'test "$(PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atqc "SELECT value FROM restore_probe LIMIT 1")" = after'
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/postgres-restore.json -w '%{http_code}'   -H 'content-type: application/json' -d '{"confirm":"RESTORE_DATABASE"}'   "http://127.0.0.1:8080/api/backups/$POSTGRES_BACKUP_ID/restore-database")"
+expect_status "$STATUS" "202" "queue PostgreSQL destructive restore" /tmp/postgres-restore.json
+DATABASE_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/postgres-restore.json","utf8")).commandId)')"
+wait_command "$DATABASE_COMMAND" "PostgreSQL destructive restore"
+docker exec "$POSTGRES_DOCKER_NAME" sh -lc 'test "$(PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atqc "SELECT value FROM restore_probe LIMIT 1")" = before'
+
+STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/postgres-delete.json -w '%{http_code}'   -X DELETE -H 'content-type: application/json' -d '{"confirm":"DELETE_DATA"}'   "http://127.0.0.1:8080/api/databases/$POSTGRES_RESOURCE_ID")"
+expect_status "$STATUS" "202" "queue PostgreSQL permanent deletion" /tmp/postgres-delete.json
+DATABASE_COMMAND="$(node -e 'const fs=require("fs");process.stdout.write(JSON.parse(fs.readFileSync("/tmp/postgres-delete.json","utf8")).commandId)')"
+wait_command "$DATABASE_COMMAND" "PostgreSQL permanent deletion"
 
 checkpoint "managed Redis permanent deletion"
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/database-delete.json -w '%{http_code}' -X DELETE -H 'content-type: application/json' -d '{"confirm":"DELETE_DATA"}' "http://127.0.0.1:8080/api/databases/$DATABASE_ID")"
