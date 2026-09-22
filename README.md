@@ -429,6 +429,49 @@ Use **Refresh live logs** on a project.
 
 The runtime agent collects the last 300 container-log lines and stores them with deployment logs. Known configured secret values are redacted before storage.
 
+## Platform self-deployment
+
+My Railway can deploy **itself** from the dashboard.
+
+The **Platform** screen compares the running commit with the configured `PLATFORM_UPDATE_REF`. When a newer release is published, choose **Deploy platform update**.
+
+Self-deployment is deliberately handled by a separate `updater` supervisor container rather than by the control-plane process that is about to be replaced.
+
+Update flow:
+
+```text
+Dashboard
+   |
+   v
+Control API
+   |
+   v
+Independent updater supervisor
+   |
+   +--> mandatory control-plane DB backup
+   +--> fetch configured release ref
+   +--> build candidate platform image
+   +--> build candidate updater image
+   +--> start candidate control plane
+   +--> candidate /healthz
+   +--> switch public control-plane traffic when healthy
+   +--> advance host checkout
+   +--> recreate control/worker/agent/maintenance/backup services
+   +--> final control-plane /healthz
+   +--> switch route back to final control service
+   +--> replace updater supervisor last
+```
+
+If candidate/final activation fails, the updater restores the previous checkout/image and keeps the pre-update database backup available. Database migrations are never blindly reversed.
+
+Only the configured release channel is accepted by the updater. Production installs default to:
+
+```dotenv
+PLATFORM_UPDATE_REF=release/private-v1-rc1
+```
+
+CI includes a real self-update integration drill that creates a temporary second platform commit, asks the running control plane to self-update, and verifies the platform and updater return healthy on the new commit.
+
 ## Platform self-test
 
 Choose **Run self-test**.
