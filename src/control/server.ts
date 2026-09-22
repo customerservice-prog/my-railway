@@ -99,6 +99,15 @@ async function resolveAlert(fingerprint: string) {
   await pool.query("UPDATE alerts SET resolved_at=now() WHERE fingerprint=$1 AND resolved_at IS NULL", [fingerprint]);
 }
 
+async function enqueueAgentCommand(serverId: string, action: string, payload: unknown, deploymentId?: string) {
+  const commandId = id("cmd");
+  await pool.query(
+    "INSERT INTO agent_commands(id,server_id,deployment_id,action,payload,payload_enc) VALUES($1,$2,$3,$4,'{}'::jsonb,$5)",
+    [commandId,serverId,deploymentId ?? null,action,encryptSecret(JSON.stringify(payload))]
+  );
+  return commandId;
+}
+
 async function createDeployment(
   serviceId: string,
   source: string,
@@ -344,7 +353,11 @@ app.get("/api/projects/:id", auth, async (req, res) => {
     service.volumes = await query("SELECT * FROM volumes WHERE service_id=$1 ORDER BY created_at", [service.id]);
     service.deployments = await query("SELECT * FROM deployments WHERE service_id=$1 ORDER BY created_at DESC LIMIT 30", [service.id]);
   }
-  res.json({ ...project, services });
+  const databases = await query(`
+    SELECT id,project_id,service_id,kind,name,docker_name,volume_name,server_id,username,database_name,variable_key,status,created_at,updated_at
+    FROM database_resources WHERE project_id=$1 ORDER BY created_at
+  `, [project.id]);
+  res.json({ ...project, services, databases });
 });
 
 app.delete("/api/projects/:id", auth, async (req: AuthedRequest, res) => {
@@ -526,6 +539,126 @@ app.get("/api/backups", auth, async (_req, res) => {
   `));
 });
 
+app.get("/api/databases", auth, async (_req, res) => {
+  res.json(await query(`
+    SELECT d.id,d.project_id,d.service_id,d.kind,d.name,d.docker_name,d.volume_name,d.server_id,d.username,d.database_name,d.variable_key,d.status,d.created_at,d.updated_at,
+      p.name project_name
+    FROM database_resources d JOIN projects p ON p.id=d.project_id
+    ORDER BY d.created_at DESC
+  `));
+});
+
+app.post("/api/projects/:id/databases", auth, async (req: AuthedRequest, res) => {
+  const parsed = z.object({
+    kind: z.enum(["postgres","redis"]),
+    name: z.string().min(1).max(60),
+    serviceId: z.string().optional(),
+    variableKey: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional()
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  const projectId = String(req.params.id);
+  const project = await one<any>("SELECT id FROM projects WHERE id=$1", [projectId]);
+  if (!project) return res.status(404).json({ error: "project not found" });
+
+  let service: any = null;
+  if (parsed.data.serviceId) {
+    service = await one<any>("SELECT id FROM services WHERE id=$1 AND project_id=$2", [parsed.data.serviceId,projectId]);
+    if (!service) return res.status(400).json({ error: "service does not belong to project" });
+  }
+
+  let server: any = null;
+  if (service) {
+    server = await one<any>(`
+      SELECT sv.id,sv.name FROM deployments d
+      JOIN servers sv ON sv.id=d.server_id
+      WHERE d.service_id=$1 AND sv.last_seen_at > now() - interval '45 seconds'
+      ORDER BY d.created_at DESC LIMIT 1
+    `, [service.id]);
+  }
+  if (!server) {
+    const preferred = optionalEnv("SERVER_ID");
+    if (preferred) {
+      server = await one<any>("SELECT id,name FROM servers WHERE id=$1 AND last_seen_at > now() - interval '45 seconds'", [preferred]);
+    }
+  }
+  if (!server) {
+    server = await one<any>("SELECT id,name FROM servers WHERE last_seen_at > now() - interval '45 seconds' ORDER BY load1 ASC NULLS LAST LIMIT 1");
+  }
+  if (!server) return res.status(409).json({ error: "no online runtime server available" });
+
+  const databaseId = id("db");
+  const dockerName = `mr-db-${databaseId.slice(-10)}`;
+  const volumeName = `${dockerName}-data`;
+  const password = crypto.randomBytes(24).toString("base64url");
+  const username = parsed.data.kind === "postgres" ? "mruser" : null;
+  const databaseName = parsed.data.kind === "postgres" ? "app" : null;
+  const variableKey = parsed.data.variableKey ?? (parsed.data.kind === "postgres" ? "DATABASE_URL" : "REDIS_URL");
+
+  await pool.query(
+    `INSERT INTO database_resources(id,project_id,service_id,kind,name,docker_name,volume_name,server_id,username,password_enc,database_name,variable_key,status)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'queued')`,
+    [databaseId,projectId,service?.id ?? null,parsed.data.kind,parsed.data.name,dockerName,volumeName,server.id,username,encryptSecret(password),databaseName,variableKey]
+  );
+
+  if (service) {
+    const connection = parsed.data.kind === "postgres"
+      ? `postgresql://${encodeURIComponent(username!)}:${encodeURIComponent(password)}@${dockerName}:5432/${encodeURIComponent(databaseName!)}`
+      : `redis://:${encodeURIComponent(password)}@${dockerName}:6379/0`;
+    await pool.query(
+      `INSERT INTO variables(id,service_id,key,value_enc,is_secret) VALUES($1,$2,$3,$4,true)
+       ON CONFLICT(service_id,key) DO UPDATE SET value_enc=excluded.value_enc,updated_at=now()`,
+      [id("var"),service.id,variableKey,encryptSecret(connection)]
+    );
+  }
+
+  const commandId = await enqueueAgentCommand(server.id,"PROVISION_DATABASE",{
+    databaseId,kind:parsed.data.kind,dockerName,volumeName,username,password,databaseName
+  });
+  await audit(req.userId ?? "unknown","database.create","database",databaseId,{kind:parsed.data.kind,projectId,serviceId:service?.id ?? null});
+  res.status(202).json({ databaseId,commandId,variableKey,server:{id:server.id,name:server.name} });
+});
+
+app.post("/api/databases/:id/backup", auth, async (req: AuthedRequest, res) => {
+  const database = await one<any>("SELECT * FROM database_resources WHERE id=$1", [String(req.params.id)]);
+  if (!database) return res.status(404).json({ error: "database not found" });
+  if (database.status !== "running") return res.status(409).json({ error: "database is not running" });
+
+  const backupId=id("bak");
+  await pool.query(
+    "INSERT INTO backups(id,service_id,database_id,server_id,kind,status) VALUES($1,$2,$3,$4,$5,'queued')",
+    [backupId,database.service_id,database.id,database.server_id,`database-${database.kind}`]
+  );
+  const commandId=await enqueueAgentCommand(database.server_id,"BACKUP_DATABASE",{
+    databaseId:database.id,kind:database.kind,dockerName:database.docker_name,volumeName:database.volume_name,
+    username:database.username,password:decryptSecret(database.password_enc),databaseName:database.database_name,
+    backupId,backupName:backupId
+  });
+  await audit(req.userId ?? "unknown","database.backup","database",database.id,{backupId});
+  res.status(202).json({backupId,commandId});
+});
+
+app.post("/api/backups/:id/restore-database", auth, async (req: AuthedRequest, res) => {
+  if (req.body?.confirm !== "RESTORE_DATABASE") {
+    return res.status(400).json({ error: "destructive database restore requires confirm=RESTORE_DATABASE" });
+  }
+  const backup=await one<any>(`
+    SELECT b.*,d.kind database_kind,d.docker_name,d.volume_name,d.username,d.password_enc,d.database_name,d.service_id
+    FROM backups b JOIN database_resources d ON d.id=b.database_id
+    WHERE b.id=$1
+  `,[String(req.params.id)]);
+  if(!backup || backup.status!=="completed" || !backup.location) {
+    return res.status(409).json({ error:"completed database backup is required" });
+  }
+  const commandId=await enqueueAgentCommand(backup.server_id,"RESTORE_DATABASE",{
+    databaseId:backup.database_id,kind:backup.database_kind,dockerName:backup.docker_name,volumeName:backup.volume_name,
+    username:backup.username,password:decryptSecret(backup.password_enc),databaseName:backup.database_name,
+    serviceId:backup.service_id,fileName:path.basename(backup.location),backupId:backup.id
+  });
+  await audit(req.userId ?? "unknown","database.restore","backup",backup.id,{databaseId:backup.database_id});
+  res.status(202).json({commandId,note:"Attached application service will be stopped before restore; redeploy it after completion."});
+});
+
 app.get("/api/services/:id/volumes", auth, async (req, res) => {
   res.json(await query("SELECT * FROM volumes WHERE service_id=$1 ORDER BY created_at", [String(req.params.id)]));
 });
@@ -589,11 +722,16 @@ app.post("/api/backups/:id/test", auth, async (req: AuthedRequest, res) => {
   if (!backup || backup.status !== "completed" || !backup.location || !backup.server_id) {
     return res.status(409).json({ error: "completed backup with a runtime location is required" });
   }
-  const commandId = id("cmd");
-  await pool.query(
-    "INSERT INTO agent_commands(id,server_id,action,payload) VALUES($1,$2,'TEST_VOLUME_BACKUP',$3)",
-    [commandId, backup.server_id, JSON.stringify({ backupId: backup.id, fileName: path.basename(backup.location) })]
-  );
+
+  let action="TEST_VOLUME_BACKUP";
+  let payload:any={backupId:backup.id,fileName:path.basename(backup.location)};
+  if(backup.database_id){
+    const database=await one<any>("SELECT kind,docker_name FROM database_resources WHERE id=$1",[backup.database_id]);
+    if(!database) return res.status(404).json({error:"database resource not found"});
+    action="TEST_DATABASE_BACKUP";
+    payload={...payload,kind:database.kind,dockerName:database.docker_name};
+  }
+  const commandId=await enqueueAgentCommand(backup.server_id,action,payload);
   await audit(req.userId ?? "unknown", "backup.test", "backup", backup.id);
   res.status(202).json({ commandId });
 });
@@ -863,14 +1001,20 @@ app.post("/api/internal/agent/commands/:id/complete", agentAuth, async (req, res
   const command = updated.rows[0];
   const commandPayload = command.payload_enc ? JSON.parse(decryptSecret(command.payload_enc)) : command.payload;
   const backupId = commandPayload?.backupId;
-  if (backupId && command.action === "BACKUP_VOLUME") {
+  if (backupId && ["BACKUP_VOLUME","BACKUP_DATABASE"].includes(command.action)) {
     await pool.query(
       "UPDATE backups SET status=$2, location=$3, size_bytes=$4, completed_at=now() WHERE id=$1",
       [backupId, status === "completed" ? "completed" : "failed", result.location ?? null, result.sizeBytes ?? null]
     );
   }
-  if (backupId && command.action === "TEST_VOLUME_BACKUP" && status === "completed") {
+  if (backupId && ["TEST_VOLUME_BACKUP","TEST_DATABASE_BACKUP"].includes(command.action) && status === "completed") {
     await pool.query("UPDATE backups SET restore_tested_at=now() WHERE id=$1", [backupId]);
+  }
+  if (command.action === "PROVISION_DATABASE" && commandPayload?.databaseId) {
+    await pool.query(
+      "UPDATE database_resources SET status=$2,updated_at=now() WHERE id=$1",
+      [commandPayload.databaseId,status === "completed" ? "running" : "failed"]
+    );
   }
   if (command.action === "FETCH_LOGS" && command.deployment_id && status === "completed") {
     const text = String(result.logs ?? "No runtime log output.").slice(-1_000_000);
