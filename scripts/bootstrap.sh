@@ -54,21 +54,25 @@ mkdir -p data/routes data/backups
 touch data/acme.json
 chmod 600 data/acme.json
 
-set -a
-source .env
-set +a
+get_env() {
+  local key="$1"
+  grep -E "^$key=" .env | tail -n1 | cut -d= -f2- || true
+}
 
-if [ -n "${ACME_EMAIL:-}" ]; then
-  sed -i "s|^      email: .*|      email: ${ACME_EMAIL}|" infra/traefik/traefik.yml
+configured_acme_email="$(get_env ACME_EMAIL)"
+configured_platform_host="$(get_env PLATFORM_HOST)"
+
+if [ -n "$configured_acme_email" ]; then
+  sed -i "s|^      email: .*|      email: $configured_acme_email|" infra/traefik/traefik.yml
 fi
 
-if [ -n "${PLATFORM_HOST:-}" ]; then
+if [ -n "$configured_platform_host" ]; then
   replace_env COOKIE_SECURE true
   cat > data/routes/control.yml <<EOF
 http:
   routers:
     control:
-      rule: "Host(\`${PLATFORM_HOST}\`)"
+      rule: "Host(\`$configured_platform_host\`)"
       entryPoints: [websecure]
       service: control
       tls:
@@ -79,7 +83,7 @@ http:
         servers:
           - url: "http://control:8080"
 EOF
-  echo "Control plane route prepared for https://${PLATFORM_HOST}"
+  echo "Control plane route prepared for https://$configured_platform_host"
 else
   echo "PLATFORM_HOST is blank; control plane will only listen on localhost:8080."
 fi
