@@ -10,6 +10,7 @@ import { activateRoute, removeRoute } from "./routes.js";
 const exec = promisify(execFile);
 const network = env("PLATFORM_NETWORK", "myrailway");
 const backupDir = env("BACKUP_DIR", "/var/lib/myrailway/backups");
+const backupVolumeName = env("BACKUP_VOLUME_NAME", "myrailway-backups");
 
 async function docker(args: string[], timeout=120_000): Promise<string> {
   const { stdout } = await exec("docker", args, { timeout, maxBuffer: 10 * 1024 * 1024 });
@@ -147,12 +148,14 @@ export async function backupVolume(volumeName: string, backupName: string) {
   await docker([
     "run","--rm",
     "-v",`${volumeName}:/source:ro`,
-    "-v",`${backupDir}:/backup`,
+    "-v",`${backupVolumeName}:/backup`,
     "alpine:3.20",
     "tar","czf",`/backup/${file}`,"-C","/source","."
   ], 30 * 60_000);
-  const stat = await fs.stat(path.join(backupDir,file));
-  return { location: path.join(backupDir,file), sizeBytes: stat.size };
+  const backupPath = path.join(backupDir,file);
+  await fs.chmod(backupPath,0o600).catch(()=>{});
+  const stat = await fs.stat(backupPath);
+  return { location: backupPath, sizeBytes: stat.size };
 }
 
 export async function testVolumeBackup(fileName: string) {
@@ -163,7 +166,7 @@ export async function testVolumeBackup(fileName: string) {
     await docker([
       "run","--rm",
       "-v",`${scratch}:/target`,
-      "-v",`${backupDir}:/backup:ro`,
+      "-v",`${backupVolumeName}:/backup:ro`,
       "alpine:3.20","sh","-lc",
       `tar tzf /backup/${safe} >/dev/null && tar xzf /backup/${safe} -C /target`
     ], 30 * 60_000);
@@ -179,7 +182,7 @@ export async function restoreVolume(volumeName: string, fileName: string, servic
   await docker([
     "run","--rm",
     "-v",`${volumeName}:/target`,
-    "-v",`${backupDir}:/backup:ro`,
+    "-v",`${backupVolumeName}:/backup:ro`,
     "alpine:3.20","sh","-lc",
     `rm -rf /target/* /target/.[!.]* /target/..?* 2>/dev/null || true; tar xzf /backup/${safe} -C /target`
   ], 30 * 60_000);
@@ -308,7 +311,7 @@ export async function testDatabaseBackup(payload: {kind:"postgres"|"redis";docke
     return {tested:safe,format:"postgres-custom"};
   }
   await docker([
-    "run","--rm","-v",`${backupDir}:/backup:ro`,"redis:7-alpine",
+    "run","--rm","-v",`${backupVolumeName}:/backup:ro`,"redis:7-alpine",
     "redis-check-rdb",`/backup/${safe}`
   ],5*60_000);
   return {tested:safe,format:"redis-rdb"};
@@ -335,7 +338,7 @@ export async function restoreDatabase(payload: DatabasePayload & {fileName:strin
     await docker([
       "run","--rm",
       "-v",`${payload.volumeName}:/data`,
-      "-v",`${backupDir}:/backup:ro`,
+      "-v",`${backupVolumeName}:/backup:ro`,
       "alpine:3.20","sh","-lc",
       `cp /backup/${safe} /data/dump.rdb && chmod 644 /data/dump.rdb`
     ],5*60_000);
