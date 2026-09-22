@@ -402,6 +402,50 @@ docker run --rm --network myrailway curlimages/curl:8.10.1 -fsS "http://$ROLLBAC
 docker run --rm --network myrailway curlimages/curl:8.10.1 -fsS "http://$ROLLBACK_CONTAINER:3000/env" | grep -q 'encrypted-fixture-secret'
 docker run --rm --network myrailway curlimages/curl:8.10.1 -fsS "http://$ROLLBACK_CONTAINER:3000/volume" | grep -q 'mounted-fixture-volume'
 
+checkpoint "management stack recovery"
+ROLLBACK_CONTAINER_ID_BEFORE="$(docker inspect -f '{{.Id}}' "$ROLLBACK_CONTAINER")"
+
+docker compose stop control worker agent updater maintenance platform-backup traefik postgres redis >/dev/null
+
+# Application containers are intentionally outside the management Compose project.
+# Losing the control plane must not stop a healthy deployed workload.
+docker ps -q --filter "label=myrailway.deployment=$ROLLBACK_DEPLOY_ID" | grep -q .
+test "$(docker inspect -f '{{.Id}}' "$ROLLBACK_CONTAINER")" = "$ROLLBACK_CONTAINER_ID_BEFORE"
+docker run --rm --network myrailway curlimages/curl:8.10.1 -fsS "http://$ROLLBACK_CONTAINER:3000/healthz" | grep -q 'healthy-good-release'
+
+docker compose up -d --no-build postgres redis traefik updater control worker agent maintenance platform-backup >/dev/null
+
+for _ in $(seq 1 90); do
+  if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+curl -fsS http://127.0.0.1:8080/healthz >/dev/null
+
+for _ in $(seq 1 60); do
+  if curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/servers > /tmp/servers-after-recovery.json 2>/dev/null &&      node -e 'const fs=require("fs");const rows=JSON.parse(fs.readFileSync("/tmp/servers-after-recovery.json","utf8"));process.exit(rows.some(s=>s.id==="local-runtime-01"&&s.online)?0:1)' 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+node -e 'const fs=require("fs");const rows=JSON.parse(fs.readFileSync("/tmp/servers-after-recovery.json","utf8"));if(!rows.some(s=>s.id==="local-runtime-01"&&s.online))process.exit(1)'
+
+curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8080/api/platform/update/info >/tmp/updater-after-recovery.json
+
+test "$(docker inspect -f '{{.Id}}' "$ROLLBACK_CONTAINER")" = "$ROLLBACK_CONTAINER_ID_BEFORE"
+docker run --rm --network myrailway curlimages/curl:8.10.1 -fsS "http://$ROLLBACK_CONTAINER:3000/healthz" | grep -q 'healthy-good-release'
+
+TRAEFIK_ID="$(docker compose ps -q traefik)"
+test -n "$TRAEFIK_ID"
+TRAEFIK_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TRAEFIK_ID")"
+test -n "$TRAEFIK_IP"
+for _ in $(seq 1 30); do
+  if docker run --rm --network myrailway curlimages/curl:8.10.1 -kfsS       --resolve "deploy-smoke.example.com:443:$TRAEFIK_IP"       "https://deploy-smoke.example.com/healthz" 2>/dev/null | grep -q 'healthy-good-release'; then
+    break
+  fi
+  sleep 1
+done
+docker run --rm --network myrailway curlimages/curl:8.10.1 -kfsS   --resolve "deploy-smoke.example.com:443:$TRAEFIK_IP"   "https://deploy-smoke.example.com/healthz" | grep -q 'healthy-good-release'
+
 checkpoint "service settings binding"
 STATUS="$(curl -sS -b /tmp/cookies.txt -o /tmp/service-update.json -w '%{http_code}' -X PATCH -H 'content-type: application/json' -d '{"memoryMb":768,"healthPath":"/"}' "http://127.0.0.1:8080/api/services/$SERVICE_ID")"
 expect_status "$STATUS" "200" "update service settings" /tmp/service-update.json
