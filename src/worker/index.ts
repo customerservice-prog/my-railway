@@ -213,6 +213,10 @@ async function processDeployment(deploymentId: string) {
     );
     await log(dep.id, `Assigned to runtime ${server.name} (${server.id})`);
     await waitForCommand(commandId, dep.id);
+    await pool.query(
+      "UPDATE deployments SET status='SUPERSEDED' WHERE service_id=$1 AND id<>$2 AND status='RUNNING'",
+      [dep.service_id, dep.id]
+    );
     await status(dep.id, "RUNNING");
     await log(dep.id, "Deployment is healthy and receiving traffic.");
   } catch (error) {
