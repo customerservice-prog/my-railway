@@ -18,6 +18,7 @@ type Deployment = {
   build_command: string|null; start_command: string|null; predeploy_command: string|null;
   internal_port: number; health_path: string; cpu_limit: string|number; memory_mb: number; kind: "web"|"worker"|"cron";
   runtime_port: number|null; detected_build_type: string|null;
+  maintenance_enabled: boolean; maintenance_message: string;
 };
 
 const registry = env("REGISTRY_URL", "local");
@@ -42,7 +43,8 @@ async function deploymentInfo(deploymentId: string): Promise<Deployment | null> 
   return one<Deployment>(`
     SELECT d.*, p.name project_name, p.slug project_slug,
       s.name service_name,s.repo_full_name,s.branch,s.root_directory,s.build_type,s.dockerfile_path,
-      s.build_command,s.start_command,s.predeploy_command,s.internal_port,s.health_path,s.cpu_limit,s.memory_mb,s.kind
+      s.build_command,s.start_command,s.predeploy_command,s.internal_port,s.health_path,s.cpu_limit,s.memory_mb,s.kind,
+      s.maintenance_enabled,s.maintenance_message
     FROM deployments d
     JOIN services s ON s.id=d.service_id
     JOIN projects p ON p.id=s.project_id
@@ -260,6 +262,8 @@ async function processDeployment(deploymentId: string) {
       predeployCommand: dep.predeploy_command,
       environment,
       domains: domains.map((d)=>d.hostname),
+      maintenanceEnabled: Boolean(dep.maintenance_enabled),
+      maintenanceMessage: dep.maintenance_message,
       volumes: volumes.map((v)=>({ name:v.docker_volume_name, mountPath:v.mount_path, readOnly:v.read_only }))
     };
 
